@@ -1,6 +1,15 @@
-(* TODO:
- * - preserver l'ordre des conjonctions
- *)
+(* ========================================================================= *)
+(*                                                                           *)
+(*       Library of complex function vector spaces : MP_SIMP_TAC tactic.     *)
+(*                                                                           *)
+(*   (c) Copyright, Vincent Aravantinos, 2012-2013                           *)
+(*                  Hardware Verification Group,                             *)
+(*                  Concordia University                                     *)
+(*                                                                           *)
+(*           Contact: <vincent@ece.concordia.ca>                             *)
+(*                                                                           *)
+(* ========================================================================= *)
+
 
 (****************************)
 (* UTILS                    *)
@@ -234,7 +243,7 @@ let horns_of_term =
 let term_of_horns =
   let term_of_horn = function
     |[],cs -> list_mk_conj cs
-    |_,[] -> (print_endline "ici";`T`)
+    |_,[] -> `T`
     |hs,cs -> mk_imp (list_mk_conj hs,list_mk_conj cs)
   in
   list_mk_conj o map term_of_horn;;

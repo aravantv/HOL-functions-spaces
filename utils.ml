@@ -1,3 +1,16 @@
+(* ========================================================================= *)
+(*                                                                           *)
+(*       Library of complex function vector spaces: utility functions.       *)
+(*                                                                           *)
+(*   (c) Copyright, Vincent Aravantinos, 2012-2013                           *)
+(*                  Hardware Verification Group,                             *)
+(*                  Concordia University                                     *)
+(*                                                                           *)
+(*           Contact: <vincent@ece.concordia.ca>                             *)
+(*                                                                           *)
+(* ========================================================================= *)
+
+
 let EQ_TO_IMP = TAUT `!P Q. (P <=> Q) <=> (P ==> Q) /\ (Q==>P)`;;
 
 let LET_DEFS = CONJ LET_DEF LET_END_DEF;;
