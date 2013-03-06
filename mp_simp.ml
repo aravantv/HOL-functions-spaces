@@ -1,6 +1,14 @@
+(* TODO:
+ * - preserver l'ordre des conjonctions
+ *)
+
 (****************************)
 (* UTILS                    *)
 (****************************)
+
+let GCONV_TAC = CONV_TAC o DEPTH_CONV o CHANGED_CONV;;
+
+let CONJS xs = end_itlist CONJ xs;;
 
 let seq x f = f x;;
 
@@ -90,8 +98,11 @@ let bpath t left right = function
   |_ -> failwith "bpath";;
 
 let indep_vars th =
-  let p,c = (dest_imp o concl o SPEC_ALL) th in
-  subtract (union (frees p) (frees (rhs c))) (frees (lhs c));;
+  let hs,c = dest_thm (SPEC_ALL th) in
+  let p,c = dest_imp c in
+  let all_vars = union (frees p) (frees (rhs c)) in
+  let dep_vars = union (frees (lhs c)) (freesl hs) in
+  subtract all_vars dep_vars;;
 
 let GEN_IMP_REWR_CONV av =
   let part_match = GEN_PART_MATCH (lhs o snd o strip_forall o snd o dest_imp) in
@@ -104,7 +115,8 @@ let atomic_mp_simp =
   let update_pr (u,th) = pr := u; th and update_bvs (vs,th) = bvs := vs; th in
   let UNDISCH_TERM = update_pr o UNDISCH_TERM in
   let SPEC_VARS = update_bvs o SPEC_VARS in
-  let base av th = UNDISCH_TERM o SPEC_VARS o GEN_IMP_REWR_CONV av th in
+  let base av th =
+    UNDISCH_TERM o SPEC_VARS o GEN_IMP_REWR_CONV av th in
   let eq p th t =
     EQ_IMP_RULE (PATH_CONV (implode p) (base (variables t) th) t) in
   let common sel lem th t p = 
@@ -146,7 +158,6 @@ let deep_mp base_ctx atomic_case =
 (* TODO
  * - Generaliser a n'importe quelle relation transitive? (see
  * SCHWARZ_INEQUALITY_ENHANCED)
- * - Generalize to "P1 ==> ... ==> Pn ==> l = r"
  *)
 let CORE_PURE_MP_SIMP_TAC =
   let PART_MATCH = PART_MATCH (lhs o snd o strip_forall o snd o dest_imp) in
@@ -181,7 +192,7 @@ let GEQT_INTRO1 = MAP_FORALL_BODY (MAP_CONCLUSION EQT_INTRO);;
 let GEQT_INTRO2 = MAP_FORALL_BODY (MAP_CONCLUSION (MAP_FORALL_BODY EQT_INTRO));;
 
 let mk_mp_rewrites th =
-  let th = TIMP_INTRO th in
+  let th = TIMP_INTRO (REWRITE_RULE[GSYM RIGHT_FORALL_IMP_THM;IMP_IMP] th) in
   let ths1 = 
     try if (is_eq o snd o dest_imp o concl o SPEC_ALL) th then [th] else []
     with _ -> []
@@ -189,7 +200,8 @@ let mk_mp_rewrites th =
   let ths2 = try [GEQT_INTRO2 th] with _ -> [] in
   union [GEQT_INTRO1 th] (union ths2 ths1);;
 
-let PURE_MP_SIMP_TAC = CORE_PURE_MP_SIMP_TAC "" o mk_mp_rewrites;;
+let PURE_MP_SIMP_TAC th =
+  CORE_PURE_MP_SIMP_TAC "" (flat (map mk_mp_rewrites (CONJUNCTS th)));;
 
 (* Simplification of Horn clauses
  * (which frequently appear when using MP_SIMP_TAC) *)
@@ -232,9 +244,9 @@ let SIMP_HORN_CONV t =
 
 let SIMP_HORN_TAC =
   ASSUM_LIST (fun xs ->
-    MP_TAC (CONJS xs) THEN REWRITE_TAC[IMP_IMP]
+    TRY (fun g -> (MP_TAC (CONJS xs) THEN REWRITE_TAC[IMP_IMP]) g)
     THEN CONV_TAC (TOP_DEPTH_CONV (CHANGED_CONV SIMP_HORN_CONV))
-    THEN ASM_REWRITE_TAC[]);;
+    THEN REWRITE_TAC xs);;
 
 let atomic_hint_exists ctx pos _ t _ =
   if not pos then failwith "atomic_hint_exists" else
@@ -253,29 +265,11 @@ let atomic_hint_exists ctx pos _ t _ =
     DISCH_THEN (REPEAT_TCL CHOOSE_THEN ASSUME_TAC) THEN REPEAT MY_EXISTS_TAC
     THEN POP_ASSUM ACCEPT_TAC);;
 
-(*
- *let atomic_hint_exists ctx pos _ t _ =
- *  if not pos then failwith "atomic_hint_exists" else
- *  let v,t' = dest_exists t in
- *  let vs,t'' = strip_exists t' in
- *  let hyp_match c h =
- *   ignore (check (not o exists (C mem vs) o frees) c);
- *   term_match (subtract (frees c) [v]) c h
- *  in
- *  let (_,subs,_) = tryfind (C tryfind ctx o hyp_match) (strip_conj t'') in
- *  let witness =
- *    match subs with
- *    |[] -> v
- *    |[t,u] when u = v -> t
- *    |_ -> failwith "atomic_hint_exists not applicable"
- *  in
- *  let instantiated_t = rhs (concl (BETA_CONV (mk_comb (rand t,witness)))) in
- *  DISCH instantiated_t (EXISTS (t,witness) (ASSUME instantiated_t));;
- *)
-
 let HINT_EXISTS_TAC (asms,c as g) =
-  let hs = map (concl o snd) asms in
-  MATCH_MP_TAC (deep_mp hs atomic_hint_exists TRUTH c (find_path is_exists c)) g;;
+  let hs = map snd asms in
+  (MATCH_MP_TAC (deep_mp (map concl hs) atomic_hint_exists
+    TRUTH c (find_path is_exists c))
+  THEN REWRITE_TAC hs) g;;
 
 let ONCE_MP_SIMP_TAC x =
   PURE_MP_SIMP_TAC x
@@ -300,26 +294,3 @@ let CASES_REWRITE_TAC th (_,c as g) =
   (ASM_CASES_TAC (lhand (concl !th)) THENL [
     POP_ASSUM (fun x -> REWRITE_TAC[MP !th x] THEN ASSUME_TAC x);
     POP_ASSUM (ASSUME_TAC o REWRITE_RULE[NOT_CLAUSES])]) g;;
-
-(*
- (* TODO Allow to provide a list of theorems instead of just assumptions.
- * Very simple on paper: abstract away the hypotheses.
- * However the theorems that one would want to use in this context would be
- * universal theorems which fucks up everything.
- *)
-let HINT_EXISTS_TAC (hs,c as g) =
-   let hs = map snd hs in
-   let v,c' = dest_exists c in
-   let vs,c' = strip_exists c' in
-   let hyp_match c h =
-     ignore (check (not o exists (C mem vs) o frees) c);
-     term_match (subtract (frees c) [v]) c (concl h), h
-   in
-   let (_,subs,_),h = tryfind (C tryfind hs o hyp_match) (strip_conj c') in
-   let witness =
-     match subs with
-       |[] -> v
-       |[t,u] when u = v -> t
-       |_ -> failwith "HINT_EXISTS_TAC not applicable"
-   in
-   (EXISTS_TAC witness THEN REWRITE_TAC hs) g;; *)

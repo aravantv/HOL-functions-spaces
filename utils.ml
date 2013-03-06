@@ -1,5 +1,7 @@
 let EQ_TO_IMP = TAUT `!P Q. (P <=> Q) <=> (P ==> Q) /\ (Q==>P)`;;
 
+let LET_DEFS = CONJ LET_DEF LET_END_DEF;;
+
 module Pa :
   sig
     val CONTEXT_TAC : ((string * pretype) list -> tactic) -> tactic
@@ -92,12 +94,9 @@ module Pa =
       call_with_interface prioritize_complex SIMPLE_COMPLEX_ARITH;
   end;;
 
-(*needs "/Volumes/NO NAME/Quantum/mp_simp.ml";;*)
-needs "/media/C81B-2C26/Quantum/mp_simp.ml";;
+needs "mp_simp.ml";;
 
 let wrap f x = f [x];;
-
-let CONJS xs = end_itlist CONJ xs;;
 
 let rec fixpoint f x =
   let y = f x in
@@ -129,6 +128,12 @@ let GIMP_IMP = CONV_RULE GIMP_IMP_CONV;;
 let MATCH_TRANS thm1 thm2 =
   GEN_ALL (DISCH_ALL (MATCH_MP thm2 (UNDISCH (SPEC_ALL thm1))));;
 
+let GCONV_TAC = CONV_TAC o DEPTH_CONV o CHANGED_CONV;;
+
 (*
 let THEN1 = ...*)
 
+let rt = REWRITE_TAC;;
+let rr = REWRITE_RULE;;
+let (!!) t = REPEAT t;;
+let (!?) t xs = REPEAT (MAP_FIRST (CHANGED_TAC o t) xs);;
