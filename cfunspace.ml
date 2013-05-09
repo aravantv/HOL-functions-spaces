@@ -11,10 +11,14 @@
 (* TODO:                                                                     *)
 (* - reword complex numbers as cfuns in order to factorize the notions of    *)
 (*   additions and linear functions                                          *)
+(* - make better use of all MP_SIMP features to reduce proof sizes           *)
+(*   (e.g., x ==> y /\ z is automatically turned into x ==> y /\ x ==> z     *)
+(* - implementation with L2                                                  *)
 (* ========================================================================= *)
 
 
 needs "Multivariate/make_complex.ml";;
+needs "imp_conv.ml";;
 needs "utils.ml";;
 
 (* ------------------------------------------------------------------------- *)
@@ -38,7 +42,7 @@ let REAL_OF_COMPLEX_CX = prove
 
 let REAL_OF_COMPLEX_NORM = prove
   (`!c. real c ==> norm c = abs (real_of_complex c)`,
-  MP_SIMP_TAC[REAL_NORM;REAL_OF_COMPLEX_RE]);;
+  IMP_REWRITE_TAC[REAL_NORM;REAL_OF_COMPLEX_RE]);;
 
 let REAL_OF_COMPLEX_ADD = prove
   (`!x y. real x /\ real y ==>
@@ -61,26 +65,11 @@ let NORM2_ADD_REAL = prove
     REAL_ADD_LID;REAL_ADD_RID;REAL_POW_ZERO;ARITH_RULE `~(2=0)`;REAL_LE_POW_2;
     SQRT_POW_2;REAL_LE_ADD]);;
 
-let real_thms = ref [];;
-let add_real_thm thm = real_thms := GIMP_IMP thm :: !real_thms;;
-let add_real_thms = List.iter add_real_thm;;
+let real_thms,add_real_thm,add_real_thms = updatable_thms ();;
 
-let REAL_TAC ?(alternatives=[]) g =
-  let is_meta_variable v = try (fst (dest_var v)).[0] = '_' with _ -> false in
-  let contain_meta_variable = can (find_term is_meta_variable) in
-  let MATCH_MP_TAC x =
-    (fun g -> MATCH_MP_TAC x g) THEN (fun (_,concl as g) ->
-      if contain_meta_variable concl then NO_TAC g else ALL_TAC g) in
-  let TRY_REAL_THM = ASM (MAP_FIRST (fun x ->
-    MATCH_ACCEPT_TAC x ORELSE MATCH_MP_TAC x)) !real_thms in
-  let LOOP = TRY_REAL_THM ORELSE (ASM_SIMP_TAC[] THEN NO_TAC)
-    ORELSE (CHANGED_TAC (ASM_SIMP_TAC[real]) THEN CONV_TAC COMPLEX_FIELD)
-    ORELSE FIRST alternatives in
-  (REPEAT STRIP_TAC
-  THEN (fun (_,concl as g) ->
-    if not (repeat rator concl = `real :complex -> bool`)
-    then FAIL_TAC "bad goal" g
-    else CHANGED_TAC (REPEAT (LOOP THEN REPEAT CONJ_TAC)) g)) g;;
+let REAL_TAC g =
+  (CHANGED_TAC (IMP_REWRITE_TAC (real_thms ()))
+  ORELSE (REWRITE_TAC[real] THEN GCONV_TAC COMPLEX_FIELD)) g;;
 
 add_real_thm REAL_MUL;;
 
@@ -116,28 +105,25 @@ new_type_abbrev("cfun",`:A->complex`);;
 new_type_abbrev("cfunB",`:B->complex`);;
 new_type_abbrev("cfunC",`:C->complex`);;
 
-let cfun_add = new_definition
-  `cfun_add:cfun->cfun->cfun = fun_map2 (+)`;;
+(* The following definitions can be accessed by prefixing "cfun_" to their
+ * names. *)
+List.iter (fun (s,t) -> let s' = "cfun_" ^ s in Meta.new_definition s' (s' ^ t))
+  [
+    "add",  "= fun_map2 (+):cfun->cfun->cfun";
+    "smul", "= ((o) o ( * )) :complex->cfun->cfun";
+    "neg",  "= (o) (--) :cfun->cfun";
+    "sub",  "= fun_map2 (-) :cfun->cfun->cfun";
+    "zero", "= K (Cx(&0)) :cfun";
+    "cnj",  "= (o) cnj :cfun->cfun";
+  ];;
 
-let cfun_smul = new_definition
-  `cfun_smul (a:complex) :cfun->cfun = (o) (( * ) a)`;;
+let CFUN_SMUL =
+  REWRITE_RULE[] (ONCE_REWRITE_RULE[FUN_EQ_THM] (REWRITE_RULE[o_DEF]
+    cfun_smul));;
 
-let cfun_neg = new_definition
-  `cfun_neg:cfun->cfun = (o) (--)`;;
-
-let cfun_sub = new_definition
-  `cfun_sub:cfun->cfun->cfun = fun_map2 (-)`;;
-
-let cfun_zero = new_definition
-  `cfun_zero:cfun = K (Cx(&0))`;;
-
-let cfun_cnj = new_definition
-  `cfun_cnj:cfun->cfun = (o) cnj`;;
-
-let cfun_defs = CONJS [cfun_add;cfun_sub;cfun_smul;cfun_neg;cfun_cnj;cfun_zero];;
+let cfun_defs = CONJS [cfun_add;cfun_sub;CFUN_SMUL;cfun_neg;cfun_cnj;cfun_zero];;
 
 make_overloadable "%" `:A->B->B`;;
-parse_as_infix("%",(25,"left"));;
 
 let prioritize_cfun () =
   overload_interface("+",`cfun_add:cfun->cfun->cfun`);
@@ -161,106 +147,96 @@ let CFUN_ARITH_TAC =
   let lemma = MESON[] `(!x. P x <=> Q x) ==> (!x. P x) = (!x. Q x)` in
   REWRITE_TAC[CFUN_TO_COMPLEX]
   THEN (CONV_TAC COMPLEX_FIELD
+    ORELSE (REWRITE_TAC[cnj] THEN SIMPLE_COMPLEX_ARITH_TAC)
     ORELSE (REPEAT STRIP_TAC THEN CONV_TAC PRENEX_CONV
       THEN MATCH_MP_TAC lemma THEN CONV_TAC COMPLEX_FIELD));;
 
 let CFUN_ARITH t = prove(t,CFUN_ARITH_TAC);;
 
-
 (* Properties *)
 
-let CFUN_SUB = CFUN_ARITH `!f g. f - g = \x. f x - g x`;;
+let store_cfun_thm,cfun_thms = property_db "CFUN";;
+let CFUN_ARITH_store s = store_cfun_thm s o CFUN_ARITH;;
+let cfun_prove_store s t tac = store_cfun_thm s (prove(t,tac));;
 
-let CFUN_SUB_THM = CFUN_ARITH `!f g. (f - g) x = f x - g x`;;
 
-let CFUN_ADD = CFUN_ARITH `!f g. f + g = \x. f x + g x`;;
+(* All the following theorems can be accessed by prefixing "CFUN_" to their
+ * names *)
+List.iter (uncurry CFUN_ARITH_store) [
+    "SUB_THM",        `!f g x. (f - g) x = f x - g x`;
+    "ADD",            `!f g. f + g = \x. f x + g x`;
+    "SMUL",           `!a f. a % f = \x. a * f x`;
+    "SMUL_THM",       `!a f x. (a % f) x = a * f x`;
+    "NEG_LAMBDA",     `!f. --f = \x. --(f x)`;
+    "SMUL_LNEG",      `!a f. (--a) % f = --(a % f)`;
+    "SMUL_RNEG",      `!a f. a % (--f) = --(a % f)`;
+    "ADD_SYM",        `!x y. x + y = y + x`;
+    "ADD_ASSOC",      `!x y z. (x + y) + z = x + y + z`;
+    "SUB",            `!x y. x - y = x + --y`;
+    "SMUL_LZERO",     `!x. Cx(&0) % x = cfun_zero`;
+    "ADD_LID",        `!x. cfun_zero + x = x`;
+    "ADD_RID",        `!x. x + cfun_zero = x`;
+    "SMUL_RZERO",     `!a. a % cfun_zero = cfun_zero`;
+    "SMUL_SYM",       `!a b x. a % (b % x) = b % (a % x)`;
+    "SUB_REFL",       `!x. x - x = cfun_zero`;
+    "SMUL_DIS",       `!a x y. a % (x + y) = a % x + a % y`;
+    "SMUL_ASSOC",     `!a b x. a % (b % x) = (a * b) % x`;
+    "ADD_RDISTRIB",   `!a b x. (a + b) % x = a % x + b % x`;
+    "SUB_RDISTRIB",   `!a b x. (a - b) % x = a % x - b % x`;
+    "SUB_RADD",       `!x y z. x - (y + z) = x - y - z`;
+    "ADD_RSUB",       `!x y z. x + (y - z) = (x + y) - z`;
+    "ADD_LSUB",       `!x y z. (x - y) + z= (x + z) - y`;
+    "SUB_RSUB",       `!x y z. x - (y - z) = x - y + z`;
+    "EQ_LSUB",        `!x y z. x - y = z <=> x = z + y`;
+    "EQ_RSUB",        `!x y z. x = y - z <=> x + z = y`;
+    "ZERO_ADD",       `!x y. y + x = x <=> y = cfun_zero`;
+    "ADD_RINV",       `!x. x + --x = cfun_zero`;
+    "ADD_LINV",       `!x. --x + x = cfun_zero`;
+    "NEG_0",          `--cfun_zero = cfun_zero`;
+    "NEG_NEG",        `!x. --(--x) = x`;
+    "NEG_SUB",        `!x y. --(x - y) = y - x`;
+    "NEG_EQ_0",       `!x. --x = cfun_zero <=> x = cfun_zero`;
+    "SUB_LDISTRIB",   `!a x y. a % (x - y) = a % x - a % y`;
+    "ADD_LDISTRIB",   `!a x y. a % (x + y) = a % x + a % y`;
+    "SMUL_DISTRIB",   `!a b f. a % (b % f) = (a * b) % f`;
+    "SMUL_LID",       `!v. Cx(&1) % v = v`;
+    "MINUS1_NEG",     `!v. (--Cx(&1)) % v = --v`;
+    "EQ_NEG2",        `!x y. --x = --y <=> x = y`;
+    "EQ_ADD_LCANCEL", `!x y z. x + y = x + z <=> y = z`;
+    "EQ_ADD_RCANCEL", `!x y z. x + z = y + z <=> x = y`;
+    "EQ_SUB_LCANCEL", `!x y z. x - y = x - z <=> y = z`;
+    "EQ_SUB_RADD",    `!x y z. x - y = z <=> x = z + y`;
+    "SUB_ADD2",       `!x y. y + x - y = x`;
+    "SUB_0",          `!x y. x - y = cfun_zero <=> x = y`;
+    "ENTIRE",         `!a x. a % x = cfun_zero <=> a = Cx(&0) \/ x = cfun_zero`;
+    "SMUL_LCANCEL",   `!x y a. a % x = a % y <=> a = Cx(&0) \/ x = y`;
+    "SMUL_RCANCEL",   `!x a b. a % x = b % x <=> a = b \/ x = cfun_zero`;
+    "SUB_LZERO",      `!op. cfun_zero - op = --op`;
+    "SUB_RZERO",      `!op. op - cfun_zero = op`;
+    "CNJ_ADD",        `!x y. cfun_cnj (x+y) = cfun_cnj x + cfun_cnj y`;
+    "CNJ_SUB",        `!x y. cfun_cnj (x-y) = cfun_cnj x - cfun_cnj y`;
+    "CNJ_NEG",        `!x y. cfun_cnj (--x) = -- cfun_cnj x`;
+    "CNJ_CNJ",        `!x y. cfun_cnj (cfun_cnj x) = x`;
+  ];;
 
-let CFUN_SMUL = CFUN_ARITH `!a f. a % f = \x. a * f x`;;
+store_cfun_thm "ADD_ID" (CONJ CFUN_ADD_LID CFUN_ADD_RID);;
 
-let CFUN_NEG_LAMBDA = CFUN_ARITH `!f. --f = \x. --(f x)`;;
+store_cfun_thm "ADD_NEUTRAL" (prove
+  (`neutral (+) = cfun_zero`,
+  REWRITE_TAC[neutral] THEN MESON_TAC[CFUN_ADD_ID]));;
 
-let CFUN_SMUL_LNEG = CFUN_ARITH `!a f. (--a) % f = --(a % f)`;;
+store_cfun_thm "ADD_MONOIDAL" (prove
+  (`monoidal ((+):cfun->cfun->cfun)`,
+  REWRITE_TAC[monoidal;CFUN_ADD_NEUTRAL] THEN CFUN_ARITH_TAC));;
 
-let CFUN_SMUL_RNEG = CFUN_ARITH `!a f. a % (--f) = --(a % f)`;;
+store_cfun_thm "ZERO_CLAUSES"  
+  (CONJS [CFUN_SUB_REFL;CFUN_ADD_RID;CFUN_SMUL_LZERO;CFUN_SMUL_RZERO]);;
 
-let CFUN_ADD_SYM = CFUN_ARITH `!x y. x + y = y + x`;;
+store_cfun_thm "ADD_INV" (CONJ CFUN_ADD_LINV CFUN_ADD_RINV);;
 
-let CFUN_ADD_ASSOC = CFUN_ARITH `!x y z. (x + y) + z = x + y + z`;;
-
-let CFUN_SUB = CFUN_ARITH `!x y. x - y = x + --y`;;
-
-let CFUN_SUB_REFL = CFUN_ARITH `!x. x - x = cfun_zero`;;
-
-let CFUN_SMUL_LZERO = CFUN_ARITH `!x. Cx(&0) % x = cfun_zero`;;
-
-let CFUN_ADD_LID = CFUN_ARITH `!x. cfun_zero + x = x`;;
-
-let CFUN_ADD_RID = CFUN_ARITH `!x. x + cfun_zero = x`;;
-
-let CFUN_SMUL_RZERO = CFUN_ARITH `!a. a % cfun_zero = cfun_zero`;;
-
-let CFUN_ZERO_CLAUSES = 
-  CONJS [CFUN_SUB_REFL;CFUN_ADD_RID;CFUN_SMUL_LZERO;CFUN_SMUL_RZERO];;
-
-let CFUN_SMUL_SYM = CFUN_ARITH `!a b x. a % (b % x) = b % (a % x)`;;
-
-let CFUN_SUB_REFL = CFUN_ARITH `!x. x - x = cfun_zero`;;
-
-let CFUN_SMUL_DIS = CFUN_ARITH `!a x y. a % (x + y) = a % x + a % y`;;
-
-let CFUN_SMUL_ASSOC = CFUN_ARITH `!a b x. a % (b % x) = (a * b) % x`;;
-
-let CFUN_ADD_RDISTRIB = CFUN_ARITH `!a b x. (a + b) % x = a % x + b % x`;;
-
-let CFUN_SUB_RDISTRIB = CFUN_ARITH `!a b x. (a - b) % x = a % x - b % x`;;
-
-let CFUN_SUB_RADD = CFUN_ARITH `!x y z. x - (y + z) = x - y - z`;;
-
-let CFUN_ADD_RSUB = CFUN_ARITH `!x y z. x + (y - z) = (x + y) - z`;;
-
-let CFUN_SUB_ADD = CFUN_ARITH `!x y z. (x - y) + z= (x + z) - y`;;
-
-let CFUN_SUB_SUB = CFUN_ARITH `!x y z. x - (y - z) = x - y + z`;;
-
-let CFUN_EQ_LSUB = CFUN_ARITH `!x y z. x - y = z <=> x = z + y`;;
-
-let CFUN_EQ_RSUB = CFUN_ARITH `!x y z. x = y - z <=> x + z = y`;;
-
-let CFUN_ZERO_ADD = CFUN_ARITH `!x y. y + x = x <=> y = cfun_zero`;;
-
-let CFUN_SUB_LDISTRIB = CFUN_ARITH `!a x y. a % (x - y) = a % x - a % y`;;
-
-let CFUN_ADD_LDISTRIB = CFUN_ARITH `!a x y. a % (x + y) = a % x + a % y`;;
-
-let CFUN_SMUL_DISTRIB = CFUN_ARITH `!a b f. a % (b % f) = (a * b) % f`;;
-
-let CFUN_SMUL_LID = CFUN_ARITH `!v. Cx(&1) % v = v`;;
-
-let CFUN_SMUL_LID_NEG = CFUN_ARITH `!v. (--Cx(&1)) % v = --v`;;
-
-let CFUN_EQ_NEG2 = CFUN_ARITH `!x y. --x = --y <=> x = y`;;
-
-let CFUN_EQ_ADD_LCANCEL = CFUN_ARITH `!x y z. x + y = x + z <=> y = z`;;
-
-let CFUN_EQ_ADD_RCANCEL = CFUN_ARITH `!x y z. x + z = y + z <=> x = y`;;
-
-let CFUN_EQ_SUB_LCANCEL = CFUN_ARITH `!x y z. x - y = x - z <=> y = z`;;
-
-let CFUN_EQ_SUB_RADD = CFUN_ARITH `!x y z. x - y = z <=> x = z + y`;;
-
-let CFUN_SUB_ADD2 = CFUN_ARITH `!x y. y + x - y = x`;;
-
-let CFUN_SUB_0 = CFUN_ARITH `!x y. x - y = cfun_zero <=> x = y`;;
-
-let CFUN_ENTIRE = CFUN_ARITH
-  `!a x. a % x = cfun_zero <=> a = Cx(&0) \/ x = cfun_zero`;;
-
-let CFUN_EQ_SMUL_LCANCEL = CFUN_ARITH
-  `!x y a. a % x = a % y <=> a = Cx(&0) \/ x = y`;;
-
-let CFUN_EQ_SMUL_LCANCEL2 = prove
-  (`!a x y. ~(a=Cx(&0)) ==> (a % x = y <=> x = inv a % y)`,
-  REWRITE_TAC[CFUN_TO_COMPLEX] THEN REPEAT STRIP_TAC
+cfun_prove_store "EQ_SMUL_LCANCEL2"
+  `!a x y. ~(a=Cx(&0)) ==> (a % x = y <=> x = inv a % y)`
+  (REWRITE_TAC[CFUN_TO_COMPLEX] THEN REPEAT STRIP_TAC
   THEN MATCH_MP_TAC (MESON[] `(!x. P x <=> Q x) ==> (!x. P x) = (!x. Q x)`)
   THEN GEN_TAC THEN POP_ASSUM MP_TAC THEN CONV_TAC COMPLEX_FIELD);;
 
@@ -270,29 +246,62 @@ let is_cfun_subspace = new_definition
     cfun_zero IN spc
     /\ !x. x IN spc ==> (!a. a % x IN spc) /\ !y. y IN spc ==> x+y IN spc`;;
 
-let CFUN_SUBSPACE_ZERO = prove
-  (`!s. is_cfun_subspace s ==> cfun_zero IN s`,
-  SIMP_TAC[is_cfun_subspace]);;
+let [CFUN_SUBSPACE_ZERO;CFUN_SUBSPACE_SMUL;CFUN_SUBSPACE_ADD] =
+  CONJUNCTS (hornify (EQ_RIMP is_cfun_subspace));;
 
-let CFUN_SUBSPACE_SMUL = prove
-  (`!s a x. is_cfun_subspace s /\ x IN s ==> a%x IN s`,
-  SIMP_TAC[is_cfun_subspace]);;
+let CFUN_SUBSPACE = CONJS [is_cfun_subspace;GSYM CFUN_MINUS1_NEG;CFUN_SUB];;
 
-let CFUN_SUBSPACE_ADD = prove
-  (`!s x y. is_cfun_subspace s /\ x IN s /\ y IN s ==> x+y IN s`,
-  SIMP_TAC[is_cfun_subspace]);;
+let CFUN_SUBSPACE_TAC = IMP_REWRITE_TAC [GSYM CFUN_MINUS1_NEG;CFUN_SUB;EQ_RIMP
+  is_cfun_subspace];;
 
 let CFUN_SUBSPACE_NEG = prove
   (`!s x. is_cfun_subspace s /\ x IN s ==> --x IN s`,
-  SIMP_TAC[GSYM CFUN_SMUL_LID_NEG;CFUN_SUBSPACE_SMUL]);;
+  CFUN_SUBSPACE_TAC);;
 
 let CFUN_SUBSPACE_SUB = prove
   (`!s x y. is_cfun_subspace s /\ x IN s /\ y IN s ==> x-y IN s`,
-  SIMP_TAC[CFUN_SUB;CFUN_SUBSPACE_NEG;CFUN_SUBSPACE_ADD]);;
+  CFUN_SUBSPACE_TAC);;
 
 let CFUN_SUBSPACE_SING_CFUNZERO = prove
   (`is_cfun_subspace {cfun_zero}`,
   SIMP_TAC[is_cfun_subspace;IN_SING;CFUN_SMUL_RZERO;CFUN_ADD_RID]);;
+
+let CFUN_SUBSPACE_UNIV = prove
+  (`is_cfun_subspace UNIV`,
+  REWRITE_TAC[is_cfun_subspace;IN_UNIV]);;
+
+
+(* ------------------------------------------------------------------------- *)
+(* SUMMATION OF CFUNS                                                        *)
+(* ------------------------------------------------------------------------- *)
+
+let cfun_sum = new_definition `cfun_sum = iterate cfun_add`;;
+  
+let CFUN_SUM_CLAUSES =
+  let th = MATCH_MP ITERATE_CLAUSES CFUN_ADD_MONOIDAL in
+  REWRITE_RULE[GSYM cfun_sum;CFUN_ADD_NEUTRAL] th;;
+
+let CFUN_SUM_CLAUSES_NUMSEG =
+  let th = MATCH_MP ITERATE_CLAUSES_NUMSEG CFUN_ADD_MONOIDAL in
+  REWRITE_RULE[GSYM cfun_sum;CFUN_ADD_NEUTRAL] th;;
+
+let CFUN_SUM_EQ =
+  let CFUN_ADD_MONOIDAL' = INST_TYPE [`:C`,`:A`] CFUN_ADD_MONOIDAL in
+  let th = MATCH_MP ITERATE_EQ CFUN_ADD_MONOIDAL' in
+  REWRITE_RULE[GSYM cfun_sum;CFUN_ADD_NEUTRAL] th;;
+
+let CFUN_SUM_VSUM = prove
+  (`!s f x. FINITE s ==> cfun_sum s f x = vsum s (\i. f i x)`,
+  ONCE_REWRITE_TAC[TAUT `(A ==> B) <=> (A ==> A ==> B)`]
+  THEN REPEAT GEN_TAC THEN Pa.SPEC_TAC ("s","s")
+  THEN MATCH_MP_TAC FINITE_INDUCT
+  THEN SIMP_TAC[CFUN_SUM_CLAUSES;VSUM_CLAUSES;CFUN_TO_COMPLEX;COMPLEX_VEC_0;
+    FINITE_INSERT;fun_map2;TAUT `((A==>B)==>A==>C) <=> (A==>B==>C)`]
+  THEN REPEAT GEN_TAC THEN COND_CASES_TAC THEN SIMP_TAC[]);;
+
+let VSUM_CFUN_SUM = prove
+  (`!s f x. FINITE s ==> vsum s (f x) = cfun_sum s (\i x. f x i) x`,
+  SIMP_TAC[CFUN_SUM_VSUM;ETA_AX]);;
 
 
 (* ------------------------------------------------------------------------- *)
@@ -308,48 +317,28 @@ let SING_EQ = prove
 let cfun_of_complex = new_definition
   `cfun_of_complex = K :complex->singleton->complex`;;
 
-let CFUN_OF_COMPLEX_ADD = prove
-  (`!x y. cfun_of_complex (x+y) = cfun_of_complex x + cfun_of_complex y`,
-  REWRITE_TAC[cfun_of_complex] THEN CFUN_ARITH_TAC);;
-
-let CFUN_OF_COMPLEX_SUB = prove
-  (`!x y. cfun_of_complex (x-y) = cfun_of_complex x - cfun_of_complex y`,
-  REWRITE_TAC[cfun_of_complex] THEN CFUN_ARITH_TAC);;
-
-let CFUN_OF_COMPLEX_NEG = prove
-  (`!x. cfun_of_complex (--x) = -- cfun_of_complex x`,
-  REWRITE_TAC[cfun_of_complex] THEN CFUN_ARITH_TAC);;
-
-let CFUN_OF_COMPLEX_SMUL = prove
-  (`!a x. cfun_of_complex (a*x) = a % cfun_of_complex x`,
-  REWRITE_TAC[cfun_of_complex] THEN CFUN_ARITH_TAC);;
-
-let CFUN_OF_COMPLEX_CNJ = prove
-  (`!x. cfun_of_complex (cnj x) = cfun_cnj (cfun_of_complex x)`,
-  REWRITE_TAC[cfun_of_complex] THEN CFUN_ARITH_TAC);;
-
-let CFUN_OF_COMPLEX_ZERO = prove
-  (`cfun_of_complex (Cx(&0)) = cfun_zero`,
-  REWRITE_TAC[cfun_of_complex] THEN CFUN_ARITH_TAC);;
+List.iter (fun (s,t) -> Meta.prove ~prefix:"CFUN_OF_COMPLEX_" s t
+  "REWRITE_TAC[cfun_of_complex] THEN CFUN_ARITH_TAC")
+  [
+    "ADD", "!x y. cfun_of_complex (x+y) = cfun_of_complex x+cfun_of_complex y";
+    "SUB", "!x y. cfun_of_complex (x-y) = cfun_of_complex x-cfun_of_complex y";
+    "NEG", "!x. cfun_of_complex (--x) = --cfun_of_complex x";
+    "SMUL","!a x. cfun_of_complex (a*x) = a%cfun_of_complex x";
+    "CNJ", "!x. cfun_of_complex (cnj x) = cfun_cnj (cfun_of_complex x)";
+    "ZERO","cfun_of_complex (Cx(&0)) = cfun_zero";
+  ];;
 
 let complex_of_cfun = new_definition
   `complex_of_cfun f :complex = f SING_ELT`;;
 
-let COMPLEX_OF_CFUN_ADD = prove
-  (`!x y. complex_of_cfun (x + y) = complex_of_cfun x + complex_of_cfun y`,
-  REWRITE_TAC[complex_of_cfun] THEN CFUN_ARITH_TAC);;
-
-let COMPLEX_OF_CFUN_SUB = prove
-  (`!x y. complex_of_cfun (x - y) = complex_of_cfun x - complex_of_cfun y`,
-  REWRITE_TAC[complex_of_cfun] THEN CFUN_ARITH_TAC);;
-
-let COMPLEX_OF_CFUN_NEG = prove
-  (`!x. complex_of_cfun (--x) = -- complex_of_cfun x`,
-  REWRITE_TAC[complex_of_cfun] THEN CFUN_ARITH_TAC);;
-
-let COMPLEX_OF_CFUN_SMUL = prove
-  (`!a x. complex_of_cfun (a % x) = a * complex_of_cfun x`,
-  REWRITE_TAC[complex_of_cfun] THEN CFUN_ARITH_TAC);;
+List.iter (fun (s,t) -> Meta.prove ~prefix:"COMPLEX_OF_CFUN_" s t
+  "REWRITE_TAC[complex_of_cfun] THEN CFUN_ARITH_TAC")
+  [
+    "ADD", "!x y. complex_of_cfun (x+y) = complex_of_cfun x+complex_of_cfun y";
+    "SUB", "!x y. complex_of_cfun (x-y) = complex_of_cfun x-complex_of_cfun y";
+    "NEG", "!x. complex_of_cfun (--x) = --complex_of_cfun x";
+    "SMUL","!a x. complex_of_cfun (a%x) = a*complex_of_cfun x";
+  ];;
 
 let COMPLEX_OF_CFUN_OF_COMPLEX = prove
   (`complex_of_cfun o cfun_of_complex = I`,
@@ -380,10 +369,12 @@ let is_inner_space = new_definition
         (!a. inprod x (a%y) = a * (inprod x y))
         /\ !z. z IN s ==> inprod (x+y) z = inprod x z + inprod y z`;;
 
+
 (* EVERY THEOREM proved using "inner_space_prove" implicitly has the assumption
  * "!s inprod. is_inner_space (s,inprod) ==>"
  *)
-let inner_space_parse s = parse_term ("!s inprod. is_inner_space (s,inprod) ==> " ^ s);;
+let inner_space_parse s =
+  parse_term ("!s inprod. is_inner_space (s,inprod) ==> " ^ s);;
 let inner_space_prove (s,p) = prove(gimp_imp (inner_space_parse s),p);;
 let inner_space_g s = g (gimp_imp (inner_space_parse s));;
 
@@ -392,119 +383,98 @@ let full_inner_space_prove (s,p) =
   prove(gimp_imp (full_inner_space_parse s),p);;
 let full_inner_space_g s = g (gimp_imp (full_inner_space_parse s));;
 
-let FORALL_INNER_SPACE_THM = prove
+
+(* Properties *)
+
+let store_inner_space_thm,inner_space_thms = property_db "INSPACE";;
+let inner_space_prove_store s t tac =
+  store_inner_space_thm s (inner_space_prove(t,tac));;
+
+let FORALL_INSPACE_THM = prove
   (`!P. (!is:inner_space. P is) <=> !s inprod. P (s,inprod)`,
   REWRITE_TAC[FORALL_PAIR_THM]);;
 
-(* Trivial properties *)
+let _ =
+  List.iter (uncurry store_inner_space_thm) (zip
+    ["IS_SUBSPACE";"SELF_REAL";"SELF_POS";"ZERO_EQ";"CNJ";"RSMUL";"ADD_RDIST"]
+    (CONJUNCTS (hornify (EQ_RIMP is_inner_space))));;
 
-let INNER_SPACE_IS_SUBSPACE = inner_space_prove
-  ("is_cfun_subspace s",
-  SIMP_TAC[is_inner_space]);;
+add_real_thm INSPACE_SELF_REAL;;
 
-let INPROD_CNJ = inner_space_prove
-  ("!x y. x IN s /\ y IN s ==> cnj(inprod y x) = inprod x y",
-  SIMP_TAC[is_inner_space]);;
+inner_space_prove_store "ZERO"
+  "inprod cfun_zero cfun_zero = Cx(&0)"
+  (SIMP_TAC[is_inner_space;is_cfun_subspace]);;
 
-let INPROD_SELF_REAL = inner_space_prove
-  ("!x. x IN s ==> real (inprod x x)",
-  SIMP_TAC[is_inner_space]);;
+inner_space_prove_store "LSMUL"
+  "!x y a. x IN s /\ y IN s ==> inprod (a%x) y = cnj a * inprod x y"
+  (MESON_TAC[is_inner_space;is_cfun_subspace;CNJ_MUL]);;
 
-let INPROD_SELF_POS = inner_space_prove
-  ("!x. x IN s ==> &0 <= real_of_complex (inprod x x)",
-  SIMP_TAC[is_inner_space]);;
+inner_space_prove_store "LNEG"
+  "!x y. x IN s /\ y IN s ==> inprod (--x) y = --inprod x y"
+  (IMP_REWRITE_TAC[GSYM CFUN_MINUS1_NEG;INSPACE_LSMUL;CNJ_NEG;CNJ_CX;
+    GSYM COMPLEX_NEG_MINUS1]);;
 
-let INPROD_RSMUL = inner_space_prove
-  ("!x y a. x IN s /\ y IN s ==> inprod x (a%y) = a * inprod x y",
-  SIMP_TAC[is_inner_space]);;
+inner_space_prove_store "SUB_RDIST"
+  "!x y z. x IN s /\ y IN s /\ z IN s ==>
+      inprod (x-y) z = inprod x z - inprod y z"
+  (IMP_REWRITE_TAC[CFUN_SUB;complex_sub;INSPACE_ADD_RDIST;INSPACE_LNEG;
+    CFUN_SUBSPACE_NEG;INSPACE_IS_SUBSPACE]);;
 
-let INPROD_ADD_RDIST = inner_space_prove
-  ("!x y z. x IN s /\ y IN s /\ z IN s
-      ==> inprod (x+y) z = inprod x z + inprod y z",
-  SIMP_TAC[is_inner_space]);;
+inner_space_prove_store "RNEG"
+  "!x y. x IN s /\ y IN s ==> inprod x (--y) = --inprod x y"
+  (IMP_REWRITE_TAC[GSYM CFUN_MINUS1_NEG;INSPACE_RSMUL;GSYM COMPLEX_NEG_MINUS1]);;
 
-let INPROD_ZERO_EQ = inner_space_prove
-  ("!x. x IN s ==> (inprod x x = Cx(&0) <=> x = cfun_zero)",
-  SIMP_TAC[is_inner_space]);;
+inner_space_prove_store "ADD_LDIST"
+  "!x y z. x IN s /\ y IN s /\ z IN s ==>
+      inprod z (x+y) = inprod z x + inprod z y"
+  (MESON_TAC[INSPACE_CNJ;INSPACE_IS_SUBSPACE;CFUN_SUBSPACE_ADD;
+    INSPACE_ADD_RDIST;CNJ_ADD]);;
 
-let INPROD_ZERO = inner_space_prove
-  ("inprod cfun_zero cfun_zero = Cx(&0)",
-  SIMP_TAC[is_inner_space;is_cfun_subspace]);;
+inner_space_prove_store "SUB_LDIST"
+  "!x y z. x IN s /\ y IN s /\ z IN s ==>
+    inprod z (x-y) = inprod z x - inprod z y"
+  (IMP_REWRITE_TAC[CFUN_SUB;complex_sub;INSPACE_ADD_LDIST;INSPACE_RNEG;
+    CFUN_SUBSPACE_NEG;INSPACE_IS_SUBSPACE]);;
 
-let INPROD_NORM = inner_space_prove
-  ("!x. x IN s ==> real (inprod x x) /\ &0 <= real_of_complex (inprod x x)",
-  SIMP_TAC[is_inner_space]);;
+inner_space_prove_store "RZERO"
+  "!x. x IN s ==> inprod x cfun_zero = Cx(&0)"
+  (IMP_REWRITE_TAC[GSYM CFUN_SMUL_LZERO;INSPACE_RSMUL;COMPLEX_MUL_LZERO]);;
 
-add_real_thm (MESON[INPROD_SELF_REAL]
-  `!s inprod x. is_inner_space (s,inprod) /\ x IN s ==> real(inprod x x)`);;
+inner_space_prove_store "LZERO"
+  "!x. x IN s ==> inprod cfun_zero x = Cx(&0)"
+  (IMP_REWRITE_TAC[GSYM CFUN_SMUL_LZERO;INSPACE_LSMUL;CNJ_CX;COMPLEX_MUL_LZERO]);;
 
-(* More involved properties *)
+inner_space_prove_store "SELF_CNJ"
+  "!x. x IN s ==> cnj (inprod x x) = inprod x x"
+  (SIMP_TAC[GSYM REAL_CNJ;is_inner_space]);;
 
-let INPROD_LSMUL = inner_space_prove
-  ("!x y a. x IN s /\ y IN s ==> inprod (a%x) y = cnj a * inprod x y",
-  MESON_TAC[is_inner_space;is_cfun_subspace;CNJ_MUL]);;
+inner_space_prove_store "SELF_NORM"
+  "!x. x IN s ==> norm (inprod x x) = real_of_complex (inprod x x)"
+  (MESON_TAC[is_inner_space;REAL_OF_COMPLEX;COMPLEX_NORM_CX;REAL_ABS_REFL]);;
 
-let INPROD_LNEG = inner_space_prove
-  ("!x y. x IN s /\ y IN s ==> inprod (--x) y = --inprod x y",
-  MP_SIMP_TAC [GSYM CFUN_SMUL_LID_NEG;INPROD_LSMUL;CNJ_NEG;CNJ_CX;
-    COMPLEX_NEG_MINUS1]);;
+inner_space_prove_store "SELF_RE"
+  "!x. x IN s ==> real_of_complex (inprod x x) = Re (inprod x x)"
+  (MESON_TAC[is_inner_space;REAL_OF_COMPLEX_RE]);;
 
-let INPROD_SUB_RDIST = inner_space_prove
-  ("!x y z. x IN s /\ y IN s /\ z IN s ==>
-      inprod (x-y) z = inprod x z - inprod y z",
-  MP_SIMP_TAC[CFUN_SUB;complex_sub;INPROD_ADD_RDIST;INPROD_LNEG;
-    CFUN_SUBSPACE_NEG;INNER_SPACE_IS_SUBSPACE]);;
-
-let INPROD_RNEG = inner_space_prove
-  ("!x y. x IN s /\ y IN s ==> inprod x (--y) = --inprod x y",
-  MP_SIMP_TAC[GSYM CFUN_SMUL_LID_NEG;INPROD_RSMUL;COMPLEX_NEG_MINUS1]);;
-
-let INPROD_ADD_LDIST = inner_space_prove
-  ("!x y z. x IN s /\ y IN s /\ z IN s ==>
-      inprod z (x+y) = inprod z x + inprod z y",
-  MESON_TAC[INPROD_CNJ;INNER_SPACE_IS_SUBSPACE;CFUN_SUBSPACE_ADD;
-    INPROD_ADD_RDIST;CNJ_ADD]);;
-
-let INPROD_SUB_LDIST = inner_space_prove
-  ("!x y z. x IN s /\ y IN s /\ z IN s ==>
-    inprod z (x-y) = inprod z x - inprod z y",
-  MP_SIMP_TAC[CFUN_SUB;complex_sub;INPROD_ADD_LDIST;INPROD_RNEG;
-    CFUN_SUBSPACE_NEG;INNER_SPACE_IS_SUBSPACE]);;
-
-let INPROD_RZERO = inner_space_prove
-  ("!x. x IN s ==> inprod x cfun_zero = Cx(&0)",
-  MP_SIMP_TAC[GSYM CFUN_SMUL_LZERO;INPROD_RSMUL;COMPLEX_MUL_LZERO]);;
-
-let INPROD_LZERO = inner_space_prove
-  ("!x. x IN s ==> inprod cfun_zero x = Cx(&0)",
-  MP_SIMP_TAC[GSYM CFUN_SMUL_LZERO;INPROD_LSMUL;CNJ_CX;COMPLEX_MUL_LZERO]);;
-
-let INPROD_SELF_CNJ = inner_space_prove
-  ("!x. x IN s ==> cnj (inprod x x) = inprod x x",
-  SIMP_TAC[GSYM REAL_CNJ;is_inner_space]);;
-
-let INPROD_SELF_NORM = inner_space_prove
-  ("!x. x IN s ==> norm (inprod x x) = real_of_complex (inprod x x)",
-  MESON_TAC[is_inner_space;REAL_OF_COMPLEX;COMPLEX_NORM_CX;REAL_ABS_REFL]);;
-
-let INPROD_SELF_RE = inner_space_prove
-  ("!x. x IN s ==> real_of_complex (inprod x x) = Re (inprod x x)",
-  MESON_TAC[is_inner_space;REAL_OF_COMPLEX_RE]);;
+inner_space_prove_store "NORM_SYM"
+  "!x y. x IN s /\ y IN s ==> norm (inprod x y) = norm (inprod y x)"
+  (MESON_TAC[INSPACE_CNJ;COMPLEX_NORM_CNJ]);;
 
 (* Surjection holds in finite dimension only *)
-let INPROD_INJ = inner_space_prove
-  ("!x y. x IN s /\ y IN s ==> (inprod x = inprod y <=> x = y)",
-  SIMP_TAC[EQ_TO_IMP] THEN ONCE_MP_SIMP_TAC (GSYM CFUN_SUB_0)
-  THEN MP_SIMP_TAC [GSYM INPROD_ZERO_EQ;INPROD_SUB_RDIST;COMPLEX_SUB_0;
-    CFUN_SUBSPACE_SUB;INNER_SPACE_IS_SUBSPACE]);;
+inner_space_prove_store "INJ"
+  "!x y. x IN s /\ y IN s ==> (inprod x = inprod y <=> x = y)"
+  (SIMP_TAC[EQ_TO_IMP] THEN REPEAT STRIP_TAC
+  THEN ONCE_REWRITE_TAC [GSYM CFUN_SUB_0]
+  THEN ASM_IMP_REWRITE_TAC [GSYM INSPACE_ZERO_EQ;INSPACE_SUB_RDIST;COMPLEX_SUB_0;
+    CFUN_SUBSPACE_SUB;INSPACE_IS_SUBSPACE]);;
 
-let INPROD_INJ_ALT = inner_space_prove
-  ("!x y. x IN s /\ y IN s
-    ==> ((!z. z IN s ==> inprod x z = inprod y z) <=> x = y)",
-  SIMP_TAC[EQ_TO_IMP] THEN ONCE_MP_SIMP_TAC (GSYM CFUN_SUB_0)
-  THEN MP_SIMP_TAC [GSYM INPROD_ZERO_EQ;INPROD_SUB_RDIST;CFUN_SUBSPACE_SUB;
-    INNER_SPACE_IS_SUBSPACE;COMPLEX_SUB_0]
-  THEN MESON_TAC [CFUN_SUBSPACE_SUB;INNER_SPACE_IS_SUBSPACE]);;
+inner_space_prove_store "INJ_ALT"
+  "!x y. x IN s /\ y IN s
+    ==> ((!z. z IN s ==> inprod x z = inprod y z) <=> x = y)"
+  (SIMP_TAC[EQ_TO_IMP] THEN REPEAT STRIP_TAC
+  THEN ONCE_REWRITE_TAC [GSYM CFUN_SUB_0]
+  THEN ASM_IMP_REWRITE_TAC [GSYM INSPACE_ZERO_EQ;INSPACE_SUB_RDIST;CFUN_SUBSPACE_SUB;
+    INSPACE_IS_SUBSPACE;COMPLEX_SUB_0]);;
 
 (* TODO RIESZ *)
 
@@ -517,114 +487,105 @@ let are_orthogonal = new_definition
   `are_orthogonal ((s,inprod):inner_space) u v <=>
     is_inner_space (s,inprod) /\ u IN s /\ v IN s ==> inprod u v = Cx(&0)`;;
 
-let ARE_ORTHOGONAL = inner_space_prove
-  ("!u v. u IN s /\ v IN s ==>
-      (are_orthogonal (s,inprod) u v <=> inprod u v = Cx(&0))",
-  MESON_TAC [are_orthogonal]);;
+let store_orthogonal_thm,orthogonal_thms = property_db "ARE_ORTHOGONAL";;
 
-let ARE_ORTHOGONAL_SYM = inner_space_prove
-  ("!u v. u IN s /\ v IN s
-      ==> (are_orthogonal (s,inprod) u v <=> are_orthogonal (s,inprod) v u)",
-  SIMP_TAC[ARE_ORTHOGONAL] THEN REPEAT (STRIP_TAC ORELSE EQ_TAC)
-  THEN ONCE_REWRITE_TAC[GSYM CNJ_INJ] THEN ASM_MESON_TAC[CNJ_CX;INPROD_CNJ]);;
+let orthogonal_prove_store s t tac =
+  store_orthogonal_thm s (inner_space_prove(t,tac));;
 
-let ARE_ORTHOGONAL_LSCALAR = inner_space_prove
-  ("!u v. u IN s /\ v IN s /\ are_orthogonal (s,inprod) u v
-      ==> !a. are_orthogonal (s,inprod) (a % u) v",
-  MP_SIMP_TAC[are_orthogonal;INPROD_LSMUL;COMPLEX_MUL_RZERO]);;
+orthogonal_prove_store "ALT"
+  "!u v. u IN s /\ v IN s ==>
+      (are_orthogonal (s,inprod) u v <=> inprod u v = Cx(&0))"
+  (MESON_TAC [are_orthogonal]);;
 
-let ORTHOGONAL_SUM_NORM = inner_space_prove
-  ("!u v. u IN s /\ v IN s /\ are_orthogonal (s,inprod) u v ==>
-    inprod (u+v) (u+v) = inprod u u + inprod v v",
-  MP_SIMP_TAC[are_orthogonal;INPROD_ADD_LDIST;INPROD_ADD_RDIST;
-    CFUN_SUBSPACE_ADD;INNER_SPACE_IS_SUBSPACE]
+orthogonal_prove_store "SYM"
+  "!u v. u IN s /\ v IN s
+      ==> (are_orthogonal (s,inprod) u v <=> are_orthogonal (s,inprod) v u)"
+  (SIMP_TAC[ARE_ORTHOGONAL_ALT] THEN REPEAT (STRIP_TAC ORELSE EQ_TAC)
+  THEN ONCE_REWRITE_TAC[GSYM CNJ_INJ] THEN ASM_MESON_TAC[CNJ_CX;INSPACE_CNJ]);;
+
+orthogonal_prove_store "LSCALAR"
+  "!u v. u IN s /\ v IN s /\ are_orthogonal (s,inprod) u v
+      ==> !a. are_orthogonal (s,inprod) (a % u) v"
+  (IMP_REWRITE_TAC[are_orthogonal;INSPACE_LSMUL]
+  THEN SIMP_TAC[COMPLEX_MUL_RZERO]);;
+
+orthogonal_prove_store "LZERO"
+  "!u v. u IN s /\ v IN s /\ are_orthogonal (s,inprod) u v
+      ==> !a. are_orthogonal (s,inprod) cfun_zero v"
+  (IMP_REWRITE_TAC[are_orthogonal;INSPACE_LZERO]);;
+
+orthogonal_prove_store "RZERO"
+  "!u v. u IN s /\ v IN s /\ are_orthogonal (s,inprod) u v
+      ==> !a. are_orthogonal (s,inprod) v cfun_zero"
+  (IMP_REWRITE_TAC[are_orthogonal;INSPACE_RZERO]);;
+
+orthogonal_prove_store "INSPACE_SELF_ADD"
+  "!u v. u IN s /\ v IN s /\ are_orthogonal (s,inprod) u v ==>
+    inprod (u+v) (u+v) = inprod u u + inprod v v"
+  (IMP_REWRITE_TAC[are_orthogonal;INSPACE_ADD_LDIST;INSPACE_ADD_RDIST;
+    CFUN_SUBSPACE_ADD;INSPACE_IS_SUBSPACE]
   THEN ONCE_REWRITE_TAC[GSYM COMPLEX_SUB_0]
   THEN (CONV_TAC o DEPTH_CONV o CHANGED_CONV) COMPLEX_POLY_CONV
-  THEN MESON_TAC[INPROD_CNJ;CNJ_CX]);;
+  THEN SIMP_TAC[COMPLEX_ADD_LID] THEN MESON_TAC[INSPACE_CNJ;CNJ_CX]);;
 
-let ORTHOGONAL_DECOMPOS_WRT_CFUN = inner_space_prove
-  ("!u v. u IN s /\ v IN s ==>
+orthogonal_prove_store "DECOMPOSITION"
+  "!u v. u IN s /\ v IN s ==>
       let proj_v = inprod v u / inprod v v in
       let orthogonal_component = u - proj_v % v in
       u = proj_v % v + orthogonal_component
-      /\ are_orthogonal (s,inprod) v orthogonal_component",
-  REWRITE_TAC[LET_DEFS;CFUN_SUB_ADD2;are_orthogonal]
-  THEN MP_SIMP_TAC [INPROD_SUB_LDIST;INPROD_RSMUL;CFUN_SUBSPACE_SMUL;
-    INNER_SPACE_IS_SUBSPACE]
+      /\ are_orthogonal (s,inprod) v orthogonal_component"
+  (REWRITE_TAC[LET_DEFS;CFUN_SUB_ADD2;are_orthogonal]
+  THEN IMP_REWRITE_TAC [INSPACE_SUB_LDIST;INSPACE_RSMUL;EQ_RIMP is_cfun_subspace;
+    INSPACE_IS_SUBSPACE]
   THEN REPEAT STRIP_TAC THEN Pa.ASM_CASES_TAC "v=cfun_zero" THENL [
-    ASM_MP_SIMP_TAC [CFUN_SMUL_RZERO;INPROD_LZERO;CFUN_SUBSPACE_ZERO;
-    INNER_SPACE_IS_SUBSPACE];
-    MP_SIMP_TAC [COMPLEX_DIV_RMUL;INPROD_ZERO_EQ]
+    ASM_IMP_REWRITE_TAC [INSPACE_LZERO;CFUN_SUBSPACE_ZERO;
+      INSPACE_IS_SUBSPACE];
+    IMP_REWRITE_TAC [COMPLEX_DIV_RMUL;INSPACE_ZERO_EQ]
   ] THEN SIMPLE_COMPLEX_ARITH_TAC);;
 
-let ORTHOGONAL_DECOMPOS_WRT_CFUN_DECOMPOSITION = inner_space_prove
-  ("!u v. u IN s /\ v IN s ==>
-      let proj_v = inprod v u / inprod v v in
-      let orthogonal_component = u - proj_v % v in
-      u = proj_v % v + orthogonal_component",
-  REWRITE_TAC [LET_DEFS]
-  THEN MESON_TAC[REWRITE_RULE [LET_DEFS] ORTHOGONAL_DECOMPOS_WRT_CFUN]);;
-
-let ORTHOGONAL_DECOMPOS_WRT_CFUN_ORTHOGONAL = inner_space_prove
-  ("!u v. u IN s /\ v IN s ==>
-      are_orthogonal (s,inprod) v (u - (inprod v u / inprod v v) % v)",
-  REWRITE_TAC [LET_DEFS]
-  THEN MESON_TAC[REWRITE_RULE [LET_DEFS] ORTHOGONAL_DECOMPOS_WRT_CFUN]);;
-
-let SCHWARZ_INEQUALITY = inner_space_prove 
-  ("!x y. x IN s /\ y IN s
+inner_space_prove_store "SCHWARZ_INEQUALITY"
+  "!x y. x IN s /\ y IN s
       ==> norm (inprod x y) pow 2
-        <= real_of_complex (inprod x x) * real_of_complex (inprod y y)",
-  MAP_EVERY ONCE_MP_SIMP_TAC [GSYM INPROD_SELF_NORM;INPROD_SELF_RE]
+        <= real_of_complex (inprod x x) * real_of_complex (inprod y y)"
+  (IMP_REWRITE_TAC[GSYM REAL_OF_COMPLEX_MUL;INSPACE_SELF_REAL]
   THEN REWRITE_TAC[MATCH_MP (TAUT `(A ==> B) ==> ((A ==> C) <=> (A /\ B ==>
-    C))`) (SPEC_ALL (REWRITE_RULE [LET_DEFS] ORTHOGONAL_DECOMPOS_WRT_CFUN))]
+    C))`) (SPEC_ALL (REWRITE_RULE [LET_DEFS] ARE_ORTHOGONAL_DECOMPOSITION))]
   THEN REPEAT STRIP_TAC
-  THEN FIRST_X_ASSUM (wrap (CHANGED_TAC o GEN_REWRITE_TAC (PATH_CONV "rl" o
+  THEN FIRST_X_ASSUM (wrap (CHANGED_TAC o GEN_REWRITE_TAC (PATH_CONV "r" o
     ONCE_DEPTH_CONV)))
-  THEN MP_SIMP_TAC [ORTHOGONAL_SUM_NORM;ARE_ORTHOGONAL_LSCALAR;
-    CFUN_SUBSPACE_SUB;INPROD_RSMUL;CFUN_SUBSPACE_SMUL;INNER_SPACE_IS_SUBSPACE;
-    INPROD_LSMUL]
-  THEN REWRITE_TAC[complex_div;CNJ_MUL;CNJ_INV]
-  THEN ONCE_MP_SIMP_TAC INPROD_SELF_NORM
-  THEN REWRITE_TAC[GSYM RE_MUL_CX]
-  THEN MP_SIMP_TAC [REAL_OF_COMPLEX;INPROD_SELF_REAL]
-  THEN ONCE_MP_SIMP_TAC INPROD_SELF_CNJ
-  THEN REWRITE_TAC[COMPLEX_ADD_RDISTRIB;
-    Pa.COMPLEX_FIELD "((x*y)*(z*t)*u)*v = (x*z)*(u*t)*(v*y)";
-    ONCE_REWRITE_RULE[GSYM COMPLEX_NORM_CNJ] COMPLEX_MUL_CNJ]
-  THEN CASES_REWRITE_TAC COMPLEX_MUL_RINV
-  THENL [
-    MP_SIMP_TAC [INPROD_CNJ]
-    THEN REWRITE_TAC[RE_ADD;RE_CX;COMPLEX_MUL_RID;GSYM CX_POW;REAL_LE_ADDR]
-    THEN MP_SIMP_TAC [GSYM REAL_OF_COMPLEX_RE;REAL_OF_COMPLEX_MUL;
-      REAL_LE_MUL;INPROD_SELF_POS;INPROD_SELF_POS;CFUN_SUBSPACE_SUB;
-      CFUN_SUBSPACE_SMUL;INNER_SPACE_IS_SUBSPACE ]
-    THEN REAL_TAC THEN HINT_EXISTS_TAC
-    THEN MP_SIMP_TAC
-      [CFUN_SUBSPACE_SUB;CFUN_SUBSPACE_SMUL;INNER_SPACE_IS_SUBSPACE]
-    THEN ASM_REWRITE_TAC[];
-    ASM_REWRITE_TAC[] THEN GCONV_TAC COMPLEX_POLY_CONV
-    THEN POP_ASSUM MP_TAC THEN ONCE_MP_SIMP_TAC INPROD_ZERO_EQ
-    THEN SIMP_TAC[] THEN MP_SIMP_TAC [INPROD_RZERO]
-    THEN REWRITE_TAC[COMPLEX_NORM_0;RE_CX] THEN ARITH_TAC
-  ]);;
+  THEN IMP_REWRITE_TAC [ARE_ORTHOGONAL_INSPACE_SELF_ADD;ARE_ORTHOGONAL_LSCALAR;
+    CFUN_SUBSPACE_SUB;INSPACE_RSMUL;CFUN_SUBSPACE_SMUL;INSPACE_IS_SUBSPACE;
+    INSPACE_LSMUL;COMPLEX_ADD_RDISTRIB]
+  THEN REWRITE_TAC[complex_div;CNJ_MUL;CNJ_INV;COMPLEX_MUL_CNJ;GSYM CX_POW;
+    Pa.COMPLEX_FIELD "((x*inv y)*(z*inv t)*y)*y = (x*z)*((y*y)*inv(y*t))";
+    GSYM CX_INV;]
+  THEN IMP_REWRITE_TAC[REAL_OF_COMPLEX_ADD;REAL_CX;REAL_OF_COMPLEX_MUL;
+    REAL_OF_COMPLEX_CX;REAL_MUL;INSPACE_SELF_REAL;CFUN_SUBSPACE_SUB;
+    CFUN_SUBSPACE_SMUL;INSPACE_IS_SUBSPACE;GSYM INSPACE_SELF_NORM;
+    GSYM REAL_POW_2;REAL_ARITH `x = y /\ &0 <= z ==> x <= y + z`;REAL_LE_MUL;
+    NORM_POS_LE]
+  THEN CASE_REWRITE_TAC REAL_MUL_RINV THEN SIMP_TAC[REAL_MUL_RID] 
+  THEN GCONV_TAC REAL_POLY_CONV
+  THEN REWRITE_TAC[REAL_POW_EQ_0;COMPLEX_NORM_ZERO]
+  THEN ASM_MESON_TAC[COMPLEX_NORM_CNJ;INSPACE_CNJ;REAL_MUL_RID;INSPACE_ZERO_EQ;
+    INSPACE_RZERO]);;
 
-let SCHWARZ_INEQUALITY_ENHANCED = inner_space_prove 
-  ("!x y. x IN s /\ y IN s ==>
+inner_space_prove_store "SCHWARZ_INEQUALITY_ENHANCED"
+  "!x y. x IN s /\ y IN s ==>
       real_of_complex ((inprod x y - inprod y x) / (Cx(&2) * ii)) pow 2
-        <= real_of_complex (inprod x x) * real_of_complex (inprod y y)",
-  MP_SIMP_TAC [MATCH_MP (MESON[REAL_LE_TRANS]
+        <= real_of_complex (inprod x x) * real_of_complex (inprod y y)"
+  (IMP_REWRITE_TAC [MATCH_MP (MESON[REAL_LE_TRANS]
     `!f g. (P ==> f x y <= g x y) ==> P /\ z <= f x y ==> z <= g x y`)
-    (SPEC_ALL SCHWARZ_INEQUALITY);
+    (SPEC_ALL INSPACE_SCHWARZ_INEQUALITY);
     MATCH_MP (REAL_ARITH `x=y+z ==> &0<=y /\ t=z ==> t<=x`) COMPLEX_SQNORM]
   THEN REWRITE_TAC[REAL_LE_POW_2]
-  THEN MP_SIMP_TAC [MESON[] `(x:real) = y ==> x pow 2 = y pow 2`]
+  THEN IMP_REWRITE_TAC [MESON[] `(x:real) = y ==> x pow 2 = y pow 2`]
   THEN ONCE_REWRITE_TAC[GSYM CX_INJ]
   THEN REWRITE_TAC[CX_IM_CNJ;GSYM COMPLEX_INV_II;complex_div;COMPLEX_INV_MUL]
-  THEN MP_SIMP_TAC [INPROD_CNJ;REAL_OF_COMPLEX]
+  THEN IMP_REWRITE_TAC [INSPACE_CNJ;REAL_OF_COMPLEX]
   THEN REWRITE_TAC[SIMPLE_COMPLEX_ARITH `x*y*inv ii=inv ii*(x*y)`;
     COMPLEX_INV_II;GSYM complex_div]
-  THEN MESON_TAC[INPROD_CNJ;CX_IM_CNJ;REAL_CX]);;
+  THEN MESON_TAC[INSPACE_CNJ;CX_IM_CNJ;REAL_CX]);;
 
 
 (* ------------------------------------------------------------------------- *)
@@ -635,33 +596,26 @@ let SCHWARZ_INEQUALITY_ENHANCED = inner_space_prove
 new_type_abbrev ("cop",`:cfunB->cfun`);;
 new_type_abbrev ("copB",`:cfunC->cfunB`);;
 
-let cop_add = new_definition
-  `cop_add:cop->cop->cop = fun_map2 (+)`;;
-
-let cop_sub = new_definition
-  `cop_sub:cop->cop->cop = fun_map2 (-)`;;
-
-let cop_neg = new_definition
-  `cop_neg:cop->cop = (o) (--)`;;
-
-let cop_mul = new_definition
-  `cop_mul:cop->copB->(cfunC->cfun) = (o)`;;
-
-let cop_smul = new_definition
-  `cop_smul:complex->cop->cop = (o) o (%)`;;
-
-let cop_zero = new_definition
-  `cop_zero:cop = K cfun_zero`;;
+List.iter (fun (s,t) -> let s' = "cop_" ^ s in Meta.new_definition s' (s' ^ t))
+  [
+    "add",  "= fun_map2 (+):cop->cop->cop";
+    "sub",  "= fun_map2 (-):cop->cop->cop";
+    "neg",  "= (o) (--):cop->cop";
+    "mul",  "= (o):cop->copB->(cfunC->cfun)";
+    "smul", "= ((o) o (%)):complex->cop->cop";
+    "zero", "= (K cfun_zero):cop";
+  ];;
 
 let cop_pow = define
   `cop_pow (op:cfun->cfun) 0 = I /\
   cop_pow op (SUC n) = cop_mul op (cop_pow op n)`;;
 
-let cop_cnj = new_definition
-  `cop_cnj:cop->cop = (o) cfun_cnj`;;
+let COP_SMUL =
+  REWRITE_RULE[] (ONCE_REWRITE_RULE[FUN_EQ_THM] (REWRITE_RULE[o_DEF]
+    cop_smul));;
 
 let cop_defs = CONJS
-  [cop_add;cop_sub;cop_neg;cop_mul;cop_smul;cop_zero;I_THM;cop_pow;cop_cnj];;
+  [cop_add;cop_sub;cop_neg;cop_mul;COP_SMUL;cop_zero;I_THM;cop_pow];;
 
 let prioritize_cop () =
   overload_interface("+",`cop_add:cop->cop->cop`);
@@ -701,166 +655,109 @@ let COP_ARITH t = prove(t,COP_ARITH_TAC);;
 
 (* Properties *)
 
-let COP_SMUL = COP_ARITH `!a op. a % op = \x. a * op x`;;
-
-let COP_SMUL_THM = COP_ARITH `!a op x. (a % op) x = a % op x`;;
-
-let COP_SMUL_ALT = COP_ARITH `!a op. a % op = \x. a * op x`;;
-
-let COP_MUL = COP_ARITH `!op1 op2. op1 ** op2 = \x. op1 (op2 x)`;;
-
-let COP_ADD = COP_ARITH `!op1 op2. op1 + op2 = \x. op1 x + op2 x`;;
-
-let COP_SUB = COP_ARITH `!op1 op2. op1 - op2 = \x. op1 x - op2 x`;;
-
-let COP_SUB_THM = COP_ARITH `!op1 op2 x. (op1 - op2) x = op1 x - op2 x`;;
-
-let COP_ZERO_THM = COP_ARITH `cop_zero x = cfun_zero`;;
-
-let COP_MUL_LID = COP_ARITH `!op. I ** op = op`;;
-
-let COP_MUL_RID = COP_ARITH `!op. op ** I = op`;;
-
-let COP_I_ID = CONJ COP_MUL_LID COP_MUL_RID;;
-
-let COP_ENTIRE = COP_ARITH
-  `!a x. a % x = cop_zero <=> a = Cx(&0) \/ x = cop_zero`;;
-
-let COP_ZERO_NEQ_ID = prove
-  (`~(I = cop_zero)`,
-  REWRITE_TAC[COP_TO_CFUN;CFUN_TO_COMPLEX;NOT_FORALL_THM]
-  THEN Pa.EXISTS_TAC "\x. Cx(&1)" THEN CONV_TAC COMPLEX_FIELD);;
-
-let COP_SMUL_I_ZERO = prove
-  (`!a. a % I = cop_zero <=> a = Cx(&0)`, 
-  REWRITE_TAC[COP_ENTIRE;COP_ZERO_NEQ_ID]);;
-
-let COP_SMUL_I_ONE = prove
-  (`!a. a % I = I <=> a = Cx(&1)`, 
-  REWRITE_TAC[COP_TO_CFUN;CFUN_TO_COMPLEX] THEN GEN_TAC THEN EQ_TAC
-  THENL [DISCH_THEN (MP_TAC o Pa.SPEC "\x.Cx(&1)"); ALL_TAC]
-  THEN CONV_TAC COMPLEX_FIELD);;
-
-let COP_MUL_I_SYM = COP_ARITH `!op. op ** I = I ** op`;;
-
-let COP_SMUL = COP_ARITH `!a op. a % op = \x. a % op x`;;
-
-let COP_MUL_THM = COP_ARITH `!x op1 op2. (op1 ** op2) x = op1 (op2 x)`;;
-
-let COP_SMUL_LNEG = COP_ARITH `!a op. --a % op = --(a % op)`;;
-
-let COP_SMUL_RNEG = COP_ARITH `!a op. a % --op = --(a % op)`;;
-
-let COP_SUB = COP_ARITH `!op1 op2. op1 - op2 = op1 + --op2`;;
-
-let COP_NEG_NEG = COP_ARITH `!op. --(--op) = op`;;
-
-let COP_NEG_ADD = COP_ARITH `!op1 op2. --(op1 + op2) = --op1 + --op2`;;
-
-let COP_NEG_SUB = COP_ARITH `!op1 op2. --(op1 - op2) = --op1 + op2`;;
-
-let COP_NEG_CLAUSES = CONJS [COP_NEG_NEG;COP_NEG_ADD;COP_NEG_SUB;COP_SUB];;
-
-let COP_SMUL_ASSOC = COP_ARITH `!a b op. a % (b % op) = (a * b) % op`;;
-
-let COP_SMUL_SYM = COP_ARITH `!a b op. a % (b % op) = b % (a % op)`;;
-
-let COP_MUL_LSMUL = COP_ARITH `!op1 op2. a % op1 ** op2 = a % (op1 ** op2)`;;
-
-let COP_ADD_SYM = COP_ARITH `!op1 op2. op1 + op2 = op2 + op1 `;;
-
-let COP_ADD_ASSOC = COP_ARITH 
-  `!op1 op2 op3. (op1 + op2) + op3  = op1 + op2 + op3 `;;
-
-let COP_ADD_LDISTRIB = COP_ARITH 
-  `!a op1 op2. a % (op1 + op2) = a % op1 + a % op2`;;
-
-let COP_ADD_RDISTRIB = COP_ARITH `!a b op. (a + b) % op = a % op + b % op`;;
-
-let COP_SMUL_INV_ID = COP_ARITH
-  `!a op. ~(a = Cx (&0)) ==> a % (inv a % op) = op`;;
-
-let COP_SUB_LDISTRIB = COP_ARITH `!a x y. a % (x - y) = a % x - a % y`;;
-
-let COP_SUB_RADD = COP_ARITH `!x y z. x - (y + z) = x - y - z`;;
-
-let COP_ADD_RSUB = COP_ARITH `!x y z. x + (y - z) = (x + y) - z`;;
-
-let COP_SUB_SUB = COP_ARITH `!x y z. x - (y - z) = x - y + z`;;
-
-let COP_ADD_RID = COP_ARITH `!x. x + cop_zero = x`;;
-
-let COP_ADD_LID = COP_ARITH `!x. cop_zero + x = x`;;
-
-let COP_ADD_SYM = COP_ARITH `!op1 op2. op1 + op2 = op2 + op1`;;
-
-let COP_ADD_ASSOC = COP_ARITH `!x y z. (x + y) + z = x + y + z`;;
-
-let COP_ADD_AC = COP_ARITH
-  `!m n p. m + n = n + m /\ (m + n) + p = m + n + p /\ m + n + p = n + m + p`;;
-
-let COP_MUL_ASSOC = COP_ARITH `!x y z . (x ** y) ** z = x ** y ** z`;;
-
-let COP_SUB_REFL = COP_ARITH `!x. x - x = cop_zero`;;
-
-let COP_SUB_ADD = COP_ARITH `!x y z. (x-y)+z= (x+z)-y`;;
-
-let COP_NEG_INJ = COP_ARITH `!x y. --x = --y <=> x = y`;;
-
-let COP_EQ_ADD_LCANCEL = COP_ARITH `!x y z. x + y = x + z <=> y=z`;;
-
-let COP_EQ_ADD_RCANCEL = COP_ARITH `!x y z. x + z = y + z <=> x=y`;;
-
-let COP_EQ_SUB_LCANCEL = COP_ARITH `!x y z. x - y = x - z <=> y=z`;;
-
-let COP_EQ_LSUB = COP_ARITH `!x y z. x - y = z <=> x = z + y`;;
-
-let COP_EQ_RSUB = COP_ARITH `!x y z. x = y - z <=> x + z = y`;;
-
-let COP_MUL_LZERO = COP_ARITH `!op. cop_zero ** op = cop_zero`;;
-
-let COP_SUB_REFL = COP_ARITH `!op. op - op = cop_zero`;;
-
-let COP_SMUL_LID_NEG = COP_ARITH `!x. (--Cx(&1)) % x = --x`;;
-
-let COP_ADD_RID = COP_ARITH `!op. op + cop_zero = op`;;
-
-let COP_ADD_LID = COP_ARITH `!op. cop_zero + op = op`;;
-
-let COP_SMUL_LID = COP_ARITH `!op. Cx(&1) % op = op`;;
-
-let COP_SMUL_RZERO = COP_ARITH `!op. a % cop_zero = cop_zero`;;
-
-let COP_SUB_LZERO = COP_ARITH `!op. cop_zero - op = --op`;;
-
-let COP_SMUL_LZERO = COP_ARITH `!x. Cx(&0) % x = cop_zero`;;
-
-let COP_ZERO_CLAUSES = CONJS
-  [COP_MUL_LZERO;COP_SUB_REFL;COP_ADD_RID;COP_ADD_LID;COP_SMUL_RZERO];;
-
-let COP_ADD_MUL_RDISTRIB =
-  COP_ARITH `!op1 op2 op3. (op1 + op2) ** op3 = op1 ** op3 + op2 ** op3`;;
-
-let COP_SUB_MUL_RDISTRIB =
-  COP_ARITH `!op1 op2 op3. (op1 - op2) ** op3 = op1 ** op3 - op2 ** op3`;;
-
-let COP_EQ_LSUB_LSUB = COP_ARITH `!x y z. x - y = z <=> x - z = y`;;
-
-let COP_EQ_LSMUL = COP_ARITH `!a x y. a % x = a % y <=> x = y \/ a = Cx(&0)`;;
+let store_cop_thm,cop_thms = property_db "COP";;
+let cop_prove_store s t tac = store_cop_thm s (prove(t,tac));;
+let COP_ARITH_store s = store_cop_thm s o COP_ARITH;;
+
+List.iter (uncurry COP_ARITH_store)
+  [
+    "SMUL",             `!a op. a % op = \x. a * op x`;
+    "SMUL_THM",         `!a op x. (a % op) x = a % op x`;
+    "SMUL_ALT",         `!a op. a % op = \x. a * op x`;
+    "MUL",              `!op1 op2. op1 ** op2 = \x. op1 (op2 x)`;
+    "ADD",              `!op1 op2. op1 + op2 = \x. op1 x + op2 x`;
+    "NEG",              `!op. --op = \x. --op x`;
+    "SUB_THM",          `!op1 op2 x. (op1 - op2) x = op1 x - op2 x`;
+    "ZERO_THM",         `!x. cop_zero x = cfun_zero`;
+    "MUL_LID",          `!op. I ** op = op`;
+    "MUL_RID",          `!op. op ** I = op`;
+    "MUL_I_SYM",        `!op. op ** I = I ** op`;
+    "SMUL",             `!a op. a % op = \x. a % op x`;
+    "MUL_THM",          `!x op1 op2. (op1 ** op2) x = op1 (op2 x)`;
+    "SMUL_LNEG",        `!a op. --a % op = --(a % op)`;
+    "SMUL_RNEG",        `!a op. a % --op = --(a % op)`;
+    "SUB",              `!op1 op2. op1 - op2 = op1 + --op2`;
+    "NEG_NEG",          `!op. --(--op) = op`;
+    "NEG_ADD",          `!op1 op2. --(op1 + op2) = --op1 + --op2`;
+    "NEG_SUB",          `!op1 op2. --(op1 - op2) = --op1 + op2`;
+    "SMUL_ASSOC",       `!a b op. a % (b % op) = (a * b) % op`;
+    "SMUL_SYM",         `!a b op. a % (b % op) = b % (a % op)`;
+    "MUL_LSMUL",        `!op1 op2. a % op1 ** op2 = a % (op1 ** op2)`;
+    "ADD_SYM",          `!op1 op2. op1 + op2 = op2 + op1 `;
+    "ADD_ASSOC",        `!op1 op2 op3. (op1 + op2) + op3 = op1 + op2 + op3`;
+    "ADD_LDISTRIB",     `!a op1 op2. a % (op1 + op2) = a % op1 + a % op2`;
+    "ADD_RDISTRIB",     `!a b op. (a + b) % op = a % op + b % op`;
+    "SMUL_INV_ID",      `!a op. ~(a = Cx (&0)) ==> a % (inv a % op) = op`;
+    "SUB_LDISTRIB",     `!a x y. a % (x - y) = a % x - a % y`;
+    "SUB_RADD",         `!x y z. x - (y + z) = x - y - z`;
+    "ADD_RSUB",         `!x y z. x + (y - z) = (x + y) - z`;
+    "SUB_SUB",          `!x y z. x - (y - z) = x - y + z`;
+    "ADD_RID",          `!x. x + cop_zero = x`;
+    "ADD_LID",          `!x. cop_zero + x = x`;
+    "ADD_SYM",          `!op1 op2. op1 + op2 = op2 + op1`;
+    "ADD_AC",           `!m n p. m + n = n + m /\ (m + n) + p = m + n + p
+                               /\ m + n + p = n + m + p`;
+    "MUL_ASSOC",        `!x y z . (x ** y) ** z = x ** y ** z`;
+    "SUB_REFL",         `!x. x - x = cop_zero`;
+    "SUB_ADD",          `!x y z. (x-y)+z= (x+z)-y`;
+    "NEG_INJ",          `!x y. --x = --y <=> x = y`;
+    "EQ_ADD_LCANCEL",   `!x y z. x + y = x + z <=> y=z`;
+    "EQ_ADD_RCANCEL",   `!x y z. x + z = y + z <=> x=y`;
+    "EQ_SUB_LCANCEL",   `!x y z. x - y = x - z <=> y=z`;
+    "EQ_LSUB",          `!x y z. x - y = z <=> x = z + y`;
+    "EQ_RSUB",          `!x y z. x = y - z <=> x + z = y`;
+    "MUL_LZERO",        `!op. cop_zero ** op = cop_zero`;
+    "SUB_REFL",         `!op. op - op = cop_zero`;
+    "SMUL_LID_NEG",     `!x. (--Cx(&1)) % x = --x`;
+    "ADD_RID",          `!op. op + cop_zero = op`;
+    "ADD_LID",          `!op. cop_zero + op = op`;
+    "SMUL_LID",         `!op. Cx(&1) % op = op`;
+    "SMUL_RZERO",       `!op. a % cop_zero = cop_zero`;
+    "SUB_LZERO",        `!op. cop_zero - op = --op`;
+    "SMUL_LZERO",       `!x. Cx(&0) % x = cop_zero`;
+    "ADD_MUL_RDISTRIB", `!op1 op2 op3.
+                              (op1 + op2) ** op3 = op1 ** op3 + op2 ** op3`;
+    "SUB_MUL_RDISTRIB", `!op1 op2 op3.
+                              (op1 - op2) ** op3 = op1 ** op3 - op2 ** op3`;
+    "EQ_LSUB_LSUB",     `!x y z. x - y = z <=> x - z = y`;
+    "EQ_LSMUL",         `!a x y. a % x = a % y <=> x = y \/ a = Cx(&0)`;
+    "POW_2",            `!op. op pow 2 = op ** op`;
+    "ADD_2",            `!op. Cx(&2) % op  = op + op`;
+    "ENTIRE",           `!a x. a%x = cop_zero <=> a = Cx(&0) \/ x = cop_zero`;
+  ];;
 
 (* FIXME Improve COP_ARITH so that it can deal with that 
  * + change the name because it does not represent the same theorem as its cfun
  * counterpart *)
-let COP_EQ_MUL_LCANCEL2 = prove
-  (`!x y z t:cop. ~(x=Cx(&0)) ==> (x % y = z % t <=> y = (z / x) % t)`,
-  REWRITE_TAC[COP_TO_CFUN;CFUN_TO_COMPLEX] THEN REPEAT STRIP_TAC
+cop_prove_store "EQ_MUL_LCANCEL2"
+  `!x y z t:cop. ~(x=Cx(&0)) ==> (x % y = z % t <=> y = (z / x) % t)`
+  (REWRITE_TAC[COP_TO_CFUN;CFUN_TO_COMPLEX] THEN REPEAT STRIP_TAC
   THEN MATCH_MP_TAC (MESON[]
     `(!x y. P x y <=> Q x y) ==> (!x y. P x y) = !x y. Q x y`)
   THEN REPEAT GEN_TAC THEN POP_ASSUM MP_TAC THEN CONV_TAC COMPLEX_FIELD);;
 
-let COP_POW_2 = COP_ARITH `!op. op pow 2 = op ** op`;;
+store_cop_thm "ZERO_CLAUSES" 
+  (CONJS [COP_MUL_LZERO;COP_SUB_REFL;COP_ADD_RID;COP_ADD_LID;COP_SMUL_RZERO]);;
 
-let COP_ADD_2 = COP_ARITH `!op. Cx(&2) % op  = op + op`;;
+store_cop_thm "I_ID" (CONJ COP_MUL_LID COP_MUL_RID);;
+
+cop_prove_store "ZERO_NEQ_ID"
+  `~(I = cop_zero)`
+  (REWRITE_TAC[COP_TO_CFUN;CFUN_TO_COMPLEX;NOT_FORALL_THM]
+  THEN Pa.EXISTS_TAC "\x. Cx(&1)" THEN CONV_TAC COMPLEX_FIELD);;
+
+cop_prove_store "SMUL_I_ZERO"
+  `!a. a % I = cop_zero <=> a = Cx(&0)`
+  (REWRITE_TAC[COP_ENTIRE;COP_ZERO_NEQ_ID]);;
+
+cop_prove_store "SMUL_I_ONE"
+  `!a. a % I = I <=> a = Cx(&1)`
+  (REWRITE_TAC[COP_TO_CFUN;CFUN_TO_COMPLEX] THEN GEN_TAC THEN EQ_TAC
+  THENL [DISCH_THEN (MP_TAC o Pa.SPEC "\x.Cx(&1)"); ALL_TAC]
+  THEN CONV_TAC COMPLEX_FIELD);;
+
+store_cop_thm "NEG_CLAUSES" 
+  (CONJS [COP_NEG_NEG;COP_NEG_ADD;COP_NEG_SUB;COP_SUB]);;
 
 
 (* ------------------------------------------------------------------------- *)
@@ -871,119 +768,114 @@ let is_linear_cop = new_definition
   `is_linear_cop (op:cop) <=>
     !x y. op (x + y) = op x + op y /\ !a. op (a % x) = a % (op x)`;;
 
-let LINCOP_ADD = prove
-  (`!x y op. is_linear_cop op ==> op (x + y) = op x + op y`, 
-  SIMP_TAC[is_linear_cop]);;
+let store_linear_thm,linear_thms = property_db "LINCOP";;
+let linear_prove_store s t tac = store_linear_thm s (prove(t,tac));;
 
-let LINCOP_SMUL = prove
-  (`!a x op. is_linear_cop op ==> op (a % x) = a % op x`, 
-  SIMP_TAC[is_linear_cop]);;
+let _ =
+  let ths = zip ["ADD";"SMUL"] (CONJUNCTS (hornify (EQ_RIMP is_linear_cop))) in
+  List.iter (uncurry store_linear_thm) ths;;
 
-let LINCOP_SUB = prove
-  (`!x y op. is_linear_cop op ==> op (x - y) = op x - op y`, 
-  SIMP_TAC[is_linear_cop;CFUN_SUB;GSYM CFUN_SMUL_LID_NEG]);;
+let _ = List.iter (fun (s,th) ->
+  let tac =
+    SIMP_TAC[is_linear_cop;CFUN_SUB;GSYM CFUN_MINUS1_NEG;COP_TO_CFUN;
+      GSYM CFUN_SMUL_LZERO] in
+  store_linear_thm s (prove(th,tac)))
+  [
+    "SUB", `!x y op. is_linear_cop op ==> op (x - y) = op x - op y`;
+    "NEG", `!x op. is_linear_cop op ==> op (--x) = --(op x)`;
+    "MUL_RSMUL", `!a op1 op2. is_linear_cop op2 ==> op2 ** (a % op1) = a % (op2 ** op1)`;
+    "ADD_MUL_LDISTRIB", `!op1 op2 op3. is_linear_cop op3 ==>
+      op3 ** (op1 + op2) = op3 ** op1 + op3 ** op2`;
+    "SUB_MUL_LDISTRIB", `!op1 op2 op3. is_linear_cop op3 ==>
+      op3 ** (op1 - op2) = op3 ** op1 - op3 ** op2`;
+  ];;
 
-let LINCOP_MUL_RSMUL = prove
-  (`!a op1 op2. is_linear_cop op2 ==> op2 ** (a % op1) = a % (op2 ** op1)`,
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN]);;
+store_linear_thm "SMUL_CLAUSES"
+  (CONJS [LINCOP_MUL_RSMUL;COP_ADD_LDISTRIB;COP_SUB_LDISTRIB;COP_MUL_LSMUL;
+    COP_MUL_ASSOC;COP_MUL_LID]);;
 
-let LINCOP_SMUL_CLAUSES = CONJS [LINCOP_MUL_RSMUL;COP_ADD_LDISTRIB;
-  COP_SUB_LDISTRIB;COP_MUL_LSMUL;COP_MUL_ASSOC;COP_MUL_LID];;
+store_linear_thm "MUL_DISTRIB_CLAUSES"
+  (CONJS[COP_ADD_MUL_RDISTRIB;COP_SUB_MUL_RDISTRIB;LINCOP_ADD_MUL_LDISTRIB;
+    LINCOP_SUB_MUL_LDISTRIB]);;
 
-let LINCOP_MUL_RMUL = prove
-  (`!op1 op2. is_linear_cop op2 ==> op2 ** (a % op1) = a % (op2 ** op1)`,
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN]);;
-
-let LINCOP_ADD_MUL_LDISTRIB = prove
-  (`!op1 op2 op3. is_linear_cop op3 ==>
-      op3 ** (op1 + op2) = op3 ** op1 + op3 ** op2`,
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN]);;
-
-let LINCOP_SUB_MUL_LDISTRIB = prove
-  (`!op1 op2 op3. is_linear_cop op3 ==>
-      op3 ** (op1 - op2) = op3 ** op1 - op3 ** op2`, 
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN;LINCOP_SUB]);;
-
-let LINCOP_MUL_DISTRIB_CLAUSES =
-  CONJS[COP_ADD_MUL_RDISTRIB;COP_SUB_MUL_RDISTRIB;LINCOP_ADD_MUL_LDISTRIB;
-    LINCOP_SUB_MUL_LDISTRIB];;
-
-let LINCOP_CFUN_ZERO = prove
+store_linear_thm "CFUN_ZERO" (prove
   (`!op. is_linear_cop op ==> op cfun_zero = cfun_zero`,
-  MESON_TAC[is_linear_cop;CFUN_SMUL_LZERO]);;
+  MESON_TAC[is_linear_cop;GSYM CFUN_SMUL_LZERO]));;
 
-let COP_POW_SMUL = prove
+store_linear_thm "INJECTIVE" (prove
+  (`!op. is_linear_cop op ==> 
+    ((!x y. op x = op y ==> x=y) <=> !x. op x = cfun_zero ==> x = cfun_zero)`,
+  ONCE_REWRITE_TAC[GSYM CFUN_SUB_0]
+  THEN SIMP_TAC[CFUN_SUB_RZERO;GSYM LINCOP_SUB]
+  THEN MESON_TAC[CFUN_SUB_RZERO]));;
+
+store_linear_thm "POW_SMUL" (prove
   (`!op. is_linear_cop op ==> !n a. (a % op) pow n = (a pow n) % (op pow n)`,
   REWRITE_TAC[is_linear_cop] THEN REPEAT (INDUCT_TAC ORELSE STRIP_TAC)
-  THEN ASM_REWRITE_TAC[COP_TO_CFUN;complex_pow] THEN CFUN_ARITH_TAC);;
+  THEN ASM_REWRITE_TAC[COP_TO_CFUN;complex_pow] THEN CFUN_ARITH_TAC));;
 
-let COP_POW_SMUL2 = prove
+store_linear_thm "POW_SMUL2" (prove
   (`!op n a. is_linear_cop op ==>  (a % op) pow n = (a pow n) % (op pow n)`,
-  MESON_TAC[COP_POW_SMUL]);;
+  MESON_TAC[LINCOP_POW_SMUL]));;
 
 (* Congruence properties *)
 
-let ADD_LINCOP = prove
-  (`!op1 op2.
-    is_linear_cop op1 /\ is_linear_cop op2 ==> is_linear_cop (op1 + op2)`,
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN] THEN REPEAT STRIP_TAC
-  THEN COP_ARITH_TAC);;
+List.iter (fun (s,t) ->
+  let tac =
+    SIMP_TAC[is_linear_cop;COP_TO_CFUN] THEN REPEAT STRIP_TAC
+    THEN COP_ARITH_TAC
+  in
+  store_linear_thm ("COMPOSE_" ^ s) (prove (t,tac)))
+  [
+    "ADD", `!op1 op2.
+        is_linear_cop op1 /\ is_linear_cop op2 ==> is_linear_cop (op1 + op2)`;
+    "SUB", `!op1 op2.
+        is_linear_cop op1 /\ is_linear_cop op2 ==> is_linear_cop (op1 - op2)`;
+    "SMUL", `!a op. is_linear_cop op ==> is_linear_cop (a % op)`;
+    "NEG", `!op. is_linear_cop op ==> is_linear_cop (--op)`;
+    "MUL", `!op1 op2.
+        is_linear_cop op1 /\ is_linear_cop op2 ==> is_linear_cop (op1 ** op2)`;
+  ];;
 
-let SUB_LINCOP = prove
-  (`!op1 op2.
-    is_linear_cop op1 /\ is_linear_cop op2 ==> is_linear_cop (op1 - op2)`,
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN] THEN REPEAT STRIP_TAC
-  THEN COP_ARITH_TAC);;
+store_linear_thm "ARITH_CLAUSES" 
+  (CONJS [LINCOP_COMPOSE_ADD;LINCOP_COMPOSE_SUB;LINCOP_COMPOSE_SMUL;
+    LINCOP_COMPOSE_MUL]);;
 
-let SMUL_LINCOP = prove
-  (`!a op. is_linear_cop op ==> is_linear_cop (a % op)`,
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN] THEN REPEAT STRIP_TAC
-  THEN COP_ARITH_TAC);;
+let lincompose_thms,add_lincompose_thm,add_lincompose_thms = updatable_thms();;
 
-let MUL_LINCOP = prove
-  (`!op1 op2.
-    is_linear_cop op1 /\ is_linear_cop op2 ==> is_linear_cop (op1 ** op2)`,
-  SIMP_TAC[is_linear_cop;COP_TO_CFUN] THEN REPEAT STRIP_TAC
-  THEN COP_ARITH_TAC);;
+add_lincompose_thms [LINCOP_COMPOSE_ADD;LINCOP_COMPOSE_SUB;LINCOP_COMPOSE_SMUL;
+  LINCOP_COMPOSE_MUL];;
 
-let ARITH_LINCOP_CLAUSES = CONJS
-  [ADD_LINCOP;SUB_LINCOP;SMUL_LINCOP;MUL_LINCOP];;
-
-let linearity_thms = ref [];;
-let add_linearity_thm thm =
-  let thm = GIMP_IMP thm in
-  linearity_thms := thm :: !linearity_thms;
-  let eta_thm = SIMP_RULE[ETA_AX] thm in
-  if (not (equals_thm thm eta_thm))
-  then linearity_thms := eta_thm :: !linearity_thms;;
-let add_linearity_thms = List.iter add_linearity_thm;;
-
-add_linearity_thms [ADD_LINCOP;SUB_LINCOP;SMUL_LINCOP;MUL_LINCOP;
-  REWRITE_RULE[cop_smul] SMUL_LINCOP];;
-
-let I_LINCOP = prove
+store_linear_thm "I" (prove
   (`is_linear_cop I`,
-  REWRITE_TAC[is_linear_cop;I_DEF]);;
+  REWRITE_TAC[is_linear_cop;I_DEF]));;
 
-add_linearity_thms [I_LINCOP;REWRITE_RULE[I_DEF] I_LINCOP];;
+add_lincompose_thms [LINCOP_I;REWRITE_RULE[I_DEF] LINCOP_I];;
 
-let ZERO_LINCOP = prove
+store_linear_thm "ZERO" (prove
   (`is_linear_cop cop_zero`, 
-  REWRITE_TAC[is_linear_cop;COP_ZERO_THM] THEN COP_ARITH_TAC);;
+  REWRITE_TAC[is_linear_cop;COP_ZERO_THM] THEN CFUN_ARITH_TAC));;
 
-add_linearity_thms [ZERO_LINCOP];;
+add_lincompose_thms [LINCOP_ZERO];;
 
-let SCALAR_LINCOP = prove
+store_linear_thm "SCALAR" (prove
   (`!a. is_linear_cop \x. a % x`, 
-  REWRITE_TAC[is_linear_cop] THEN CFUN_ARITH_TAC);;
+  REWRITE_TAC[is_linear_cop] THEN CFUN_ARITH_TAC));;
   
-let LINEARITY_TAC g =
-  let MATCH_MP_TAC x y = MATCH_MP_TAC x y in
-  let TRY_LINEARITY_THM = ASM (MAP_FIRST (fun x ->
-    MATCH_ACCEPT_TAC x ORELSE MATCH_MP_TAC x)) !linearity_thms in
-  let LOOP = TRY_LINEARITY_THM ORELSE (SIMP_TAC[ETA_AX] THEN TRY_LINEARITY_THM)
-    ORELSE (ASM_SIMP_TAC[] THEN NO_TAC) in
-  (REPEAT STRIP_TAC THEN CHANGED_TAC (REPEAT (LOOP THEN REPEAT CONJ_TAC))) g;;
+store_linear_thm "COP_NEG" (prove
+  (`is_linear_cop (--)`,
+  REWRITE_TAC[is_linear_cop] THEN CFUN_ARITH_TAC));;
+
+store_linear_thm "SUM" (prove
+  (`!f g s. is_linear_cop f /\ FINITE s 
+    ==> f (cfun_sum s g) = cfun_sum s (f o g)`,
+  REWRITE_TAC[TAUT `(A /\ B ==> C) <=> (B ==> B ==> A ==> C)`] 
+  THEN REPEAT (MATCH_MP_TAC FINITE_INDUCT ORELSE GEN_TAC)
+  THEN REWRITE_TAC[CFUN_SUM_CLAUSES;LINCOP_CFUN_ZERO;FINITE_INSERT]
+  THEN ONCE_SIMP_TAC[CFUN_SUM_CLAUSES] THEN REPEAT GEN_TAC THEN COND_CASES_TAC
+  THEN SIMP_TAC[LINCOP_ADD;o_THM]));;
+
+let LINEARITY_TAC g = IMP_REWRITE_TAC (lincompose_thms ()) g;;
 
 
 (* ------------------------------------------------------------------------- *)
@@ -999,7 +891,7 @@ new_type_abbrev("cfun_dualB",`:cfunB->complex`);;
 
 let cfun_dual = new_definition
   `cfun_dual (spc:cfun->bool) =
-    { f:cfun->complex | is_linear_cop (cfun_of_complex o f) }`;;
+    { f:cfun_dual | is_linear_cop (cfun_of_complex o f) }`;;
 
 (*
  *let cfun_topological_dual = new_definition
@@ -1029,9 +921,9 @@ let COMMUTATOR_ZERO_SYM = prove
 let LINCOP_COMMUTATOR = prove
   (`!op1 op2. is_linear_cop op1 /\ is_linear_cop op2
     ==> is_linear_cop (commutator op1 op2)`,
-  REWRITE_TAC[commutator] THEN REPEAT STRIP_TAC THEN LINEARITY_TAC);;
+  REWRITE_TAC[commutator] THEN LINEARITY_TAC);;
 
-add_linearity_thm LINCOP_COMMUTATOR;;
+add_lincompose_thm LINCOP_COMMUTATOR;;
 
 let expectation = new_definition
   `expectation (inprod:inprod) f op = inprod f (op f)`;;  
@@ -1046,9 +938,9 @@ let DEVIATION_ALT = prove
 let LINCOP_DEVIATION = prove
   (`!inprod state op. is_linear_cop op
     ==> is_linear_cop (deviation inprod state op)`,
-    REWRITE_TAC[deviation;GSYM COP_SMUL] THEN LINEARITY_TAC);;
+  REWRITE_TAC[deviation;GSYM COP_SMUL] THEN LINEARITY_TAC);;
 
-add_linearity_thm LINCOP_DEVIATION;;
+add_lincompose_thm LINCOP_DEVIATION;;
 
 let variance = new_definition
   `variance  (inprod:inprod) f op = 
@@ -1058,17 +950,17 @@ let DEVIATION_COMMUTATOR = prove
   (`!inprod op1 op2 state. is_linear_cop op1 /\ is_linear_cop op2
     ==> commutator (deviation inprod state op1) (deviation inprod state op2)
       = commutator op1 op2`,
-  SIMP_TAC[DEVIATION_ALT;commutator] THEN MP_SIMP_TAC [LINCOP_SUB_MUL_LDISTRIB]
-  THEN REPEAT STRIP_TAC THEN TRY LINEARITY_TAC
-  THEN ASM_SIMP_TAC[LINCOP_MUL_DISTRIB_CLAUSES;COP_MUL_LSMUL;COP_I_ID;
-    LINCOP_MUL_RMUL;MESON[COP_SMUL_SYM]
+  IMP_REWRITE_TAC [DEVIATION_ALT;commutator;LINCOP_SUB_MUL_LDISTRIB]
+  THEN LINEARITY_TAC
+  THEN SIMP_TAC[LINCOP_MUL_DISTRIB_CLAUSES;COP_MUL_LSMUL;COP_I_ID;
+    LINCOP_MUL_RSMUL;MESON[COP_SMUL_SYM]
       `f (a % (b % op)) (b % (a % op)) = f (a % (b % op)) (a % (b % op))`]
   THEN COP_ARITH_TAC);;
 
 let EXPEC_ZERO_STATE = prove
   (`!s inprod op. is_linear_cop op /\ is_inner_space (s,inprod)
     ==> expectation inprod cfun_zero op = Cx(&0)`,
-  MESON_TAC[expectation;INPROD_ZERO;LINCOP_CFUN_ZERO]);;
+  MESON_TAC[expectation;INSPACE_ZERO;LINCOP_CFUN_ZERO]);;
 
 
 (* ------------------------------------------------------------------------- *)
@@ -1114,13 +1006,14 @@ let IS_CLOSED_INPROD_SCALAR = inner_space_prove
 let IS_CLOSED_BY_COP_SMUL = prove
   (`!s a op.
       is_cfun_subspace s /\ is_closed_by s op ==> is_closed_by s (a % op)`,
-  MP_SIMP_TAC[is_closed_by;COP_TO_CFUN;CFUN_SUBSPACE_SMUL]);;
+  IMP_REWRITE_TAC[is_closed_by;COP_TO_CFUN;CFUN_SUBSPACE_SMUL]);;
 
 let IS_CLOSED_BY_COMMUTATOR = prove
   (`!s a op.
       is_cfun_subspace s /\ is_closed_by s op1 /\ is_closed_by s op2
         ==> is_closed_by s (commutator op1 op2)`,
-  MP_SIMP_TAC[commutator;IS_CLOSED_BY_COP_MUL;IS_CLOSED_BY_COP_SUB]);;
+  IMP_REWRITE_TAC[commutator;IS_CLOSED_BY_COP_MUL;IS_CLOSED_BY_COP_SUB]);;
+
 
 (* ------------------------------------------------------------------------- *)
 (* HERMITIAN                                                                 *)
@@ -1133,82 +1026,75 @@ let is_hermitian = new_definition
       /\ is_linear_cop op1 /\ is_linear_cop op2
       /\ !x y. x IN s /\ y IN s ==> inprod x (op1 y) = inprod (op2 x) y`;;
 
-let HERM_LINCOP = full_inner_space_prove
-  ("!op1 op2. is_hermitian is op1 op2 ==> is_linear_cop op1 /\ is_linear_cop op2",
-  SIMP_TAC[FORALL_INNER_SPACE_THM;is_hermitian]);;
+let [HERM_IS_CLOSED_BY_L;HERM_IS_CLOSED_BY_R;HERM_LINCOP_L;HERM_LINCOP_R;_] =
+  CONJUNCTS (hornify (EQ_RIMP is_hermitian));;
 
-let HERM_LINCOP_L = full_inner_space_prove
-  ("!op1 op2. is_hermitian is op1 op2 ==> is_linear_cop op1",
-  SIMP_TAC[FORALL_INNER_SPACE_THM;is_hermitian]);;
-
-let HERM_LINCOP_R = full_inner_space_prove
-  ("!op1 op2. is_hermitian is op1 op2 ==> is_linear_cop op2",
-  SIMP_TAC[FORALL_INNER_SPACE_THM;is_hermitian]);;
-
-let HERM_IS_CLOSED_BY_L = inner_space_prove
-  ("!op1 op2. is_hermitian (s,inprod) op1 op2 ==> is_closed_by s op1",
-  SIMP_TAC[is_hermitian]);;
-
-let HERM_IS_CLOSED_BY_R = inner_space_prove
-  ("!op1 op2. is_hermitian (s,inprod) op1 op2 ==> is_closed_by s op2",
-  SIMP_TAC[is_hermitian]);;
+let HERM_LINCOP_L,HERM_LINCOP_R =
+  let f = GEN_ALL o REWRITE_RULE[GSYM FORALL_INSPACE_THM] o GENL
+    [`s:cfun->bool`;`inprod:inprod`] o SPEC_ALL in
+  f HERM_LINCOP_L,f HERM_LINCOP_R;;
 
 let ADD_HERM = full_inner_space_prove
   ("!op1 op2 op3 op4.
     is_hermitian is op1 op2 /\ is_hermitian is op3 op4
     ==> is_hermitian is (op1+op3) (op2+op4)",
-  REWRITE_TAC[FORALL_INNER_SPACE_THM;is_hermitian;is_closed_by]
-  THEN SIMP_HORN_TAC THEN REPEAT STRIP_TAC THEN TRY LINEARITY_TAC
-  THEN MP_SIMP_TAC [COP_TO_CFUN;CFUN_SUBSPACE_ADD;INNER_SPACE_IS_SUBSPACE;
-    INPROD_ADD_LDIST;INPROD_ADD_RDIST]);;
+  REWRITE_TAC[FORALL_INSPACE_THM;is_hermitian;is_closed_by]
+  THEN IMP_REWRITE_TAC (lincompose_thms ()) THEN REWRITE_TAC[COP_TO_CFUN]
+  THEN IMP_REWRITE_TAC[CFUN_SUBSPACE_ADD;INSPACE_IS_SUBSPACE;
+    INSPACE_ADD_LDIST;INSPACE_ADD_RDIST]
+  THEN SIMP_TAC[]);;
 
 let SUB_HERM = full_inner_space_prove
   ("!op1 op2 op3 op4. 
     is_hermitian is op1 op2 /\ is_hermitian is op3 op4
       ==> is_hermitian is (op1-op3) (op2-op4)",
-  REWRITE_TAC[FORALL_INNER_SPACE_THM;is_hermitian;is_closed_by]
-  THEN SIMP_HORN_TAC THEN REPEAT STRIP_TAC THEN TRY LINEARITY_TAC
-  THEN MP_SIMP_TAC [COP_TO_CFUN;CFUN_SUBSPACE_SUB;INNER_SPACE_IS_SUBSPACE;
-    INPROD_SUB_LDIST;INPROD_SUB_RDIST]);;
+  REWRITE_TAC[FORALL_INSPACE_THM;is_hermitian;is_closed_by]
+  THEN IMP_REWRITE_TAC (lincompose_thms ()) THEN REWRITE_TAC[COP_TO_CFUN]
+  THEN IMP_REWRITE_TAC[CFUN_SUBSPACE_SUB;INSPACE_IS_SUBSPACE;
+    INSPACE_SUB_LDIST;INSPACE_SUB_RDIST]
+  THEN SIMP_TAC[]);;
 
 let MUL_HERM = full_inner_space_prove
   ("!op1 op2 op3 op4.
     is_hermitian is op1 op2 /\ is_hermitian is op3 op4  
       ==> is_hermitian is (op1**op3) (op4**op2)",
-  REWRITE_TAC[FORALL_INNER_SPACE_THM;is_hermitian;is_closed_by]
-  THEN SIMP_HORN_TAC THEN REPEAT STRIP_TAC THEN TRY LINEARITY_TAC
-  THEN REWRITE_TAC[COP_TO_CFUN;cop_mul;o_DEF] THEN ASM_MESON_TAC[]);;
+  REWRITE_TAC[FORALL_INSPACE_THM;is_hermitian;is_closed_by]
+  THEN IMP_REWRITE_TAC (lincompose_thms ())
+  THEN REWRITE_TAC[COP_TO_CFUN;cop_mul;o_DEF]
+  THEN MESON_TAC[]);;
 
 let SMUL_HERM = full_inner_space_prove
   ("!a op1 op2 op3 op4.
     is_hermitian is op1 op2 /\ is_hermitian is op3 op4
       ==> is_hermitian is (a % op1) (cnj a % op2)",
-  REWRITE_TAC[FORALL_INNER_SPACE_THM;is_hermitian;is_closed_by]
-  THEN SIMP_HORN_TAC THEN REPEAT STRIP_TAC THEN TRY LINEARITY_TAC
-  THEN MP_SIMP_TAC [COP_TO_CFUN;CFUN_SUBSPACE_SMUL;INNER_SPACE_IS_SUBSPACE;
-    INPROD_LSMUL;INPROD_RSMUL]
+  REWRITE_TAC[FORALL_INSPACE_THM;is_hermitian;is_closed_by]
+  THEN IMP_REWRITE_TAC (lincompose_thms ()) THEN REWRITE_TAC[COP_TO_CFUN]
+  THEN IMP_REWRITE_TAC[CFUN_SUBSPACE_SMUL;INSPACE_IS_SUBSPACE;INSPACE_LSMUL;
+    INSPACE_RSMUL]
   THEN ASM_MESON_TAC[CNJ_CNJ]);;
 
 let ZERO_HERM = prove
   (`!is. is_hermitian is cop_zero cop_zero`,
-  MP_SIMP_TAC[FORALL_INNER_SPACE_THM;is_hermitian;is_closed_by;ZERO_LINCOP;
-    COP_ZERO_THM;CFUN_SUBSPACE_ZERO;INNER_SPACE_IS_SUBSPACE;INPROD_RZERO;
-    INPROD_LZERO]);;
+  REWRITE_TAC[FORALL_INSPACE_THM;is_hermitian;is_closed_by;LINCOP_ZERO;
+    COP_ZERO_THM]
+  THEN IMP_REWRITE_TAC[CFUN_SUBSPACE_ZERO;INSPACE_IS_SUBSPACE;INSPACE_RZERO;
+    INSPACE_LZERO]);;
   
-let ARITH_HERM_CLAUSES = CONJS [ADD_HERM;SUB_HERM;MUL_HERM;SMUL_HERM];;
+let ARITH_HERM_CLAUSES =
+  CONJS [ZERO_HERM;ADD_HERM;SUB_HERM;MUL_HERM;SMUL_HERM];;
 
 let HERM_SYM = prove
   (`!is op1 op2.
     is_hermitian is op1 op2 <=> is_hermitian is op2 op1`,
-  REWRITE_TAC[FORALL_INNER_SPACE_THM;is_hermitian;is_closed_by]
-  THEN MESON_TAC[CX_INJ;INPROD_CNJ]);;
+  REWRITE_TAC[FORALL_INSPACE_THM;is_hermitian;is_closed_by]
+  THEN MESON_TAC[CX_INJ;INSPACE_CNJ]);;
 
 let HERM_UNIQUENESS = prove
   (`!s inprod op1 op2 op3.
       is_inner_space (s,inprod)
       /\ is_hermitian (s,inprod) op1 op2 /\ is_hermitian (s,inprod) op1 op3
         ==> !x. x IN s ==> op2 x = op3 x`,
-  MP_SIMP_TAC [is_hermitian;COP_EQ;is_closed_by;GSYM INPROD_INJ_ALT]
+  IMP_REWRITE_TAC [is_hermitian;COP_EQ;is_closed_by;GSYM INSPACE_INJ_ALT]
   THEN ASM_MESON_TAC[]);;
 
 let HERM_UNIQUENESS_ALT = prove
@@ -1223,7 +1109,7 @@ let HERM_PROP_ADVANCED = inner_space_prove
     is_hermitian (s,inprod) op1 op2 /\ is_hermitian (s,inprod) op3 op4
     /\ is_hermitian (s,inprod) op5 (a % op1 + b % op3)
       ==> !x. x IN s ==> op5 x = (cnj a % op2 + cnj b % op4) x",
-  MP_SIMP_TAC[COP_EQ;GIMP_IMP HERM_UNIQUENESS_ALT]
+  IMP_REWRITE_TAC[COP_EQ;HERM_UNIQUENESS_ALT]
   THEN MESON_TAC[ARITH_HERM_CLAUSES;CNJ_CNJ;HERM_SYM]);;
 
 
@@ -1235,15 +1121,15 @@ let is_self_adjoint = new_definition
   `is_self_adjoint is op <=> is_hermitian is op op`;;
 
 let IS_SELF_ADJOINT =
-  REWRITE_RULE[FORALL_INNER_SPACE_THM;is_hermitian] is_self_adjoint;;
+  REWRITE_RULE[FORALL_INSPACE_THM;is_hermitian] is_self_adjoint;;
 
 let SELF_ADJ_IS_LINCOP = full_inner_space_prove
   ("!op. is_self_adjoint is op ==> is_linear_cop op",
-  MP_SIMP_TAC[is_self_adjoint;HERM_LINCOP_L]);;
+  IMP_REWRITE_TAC[is_self_adjoint;HERM_LINCOP_L]);;
 
 let SELF_ADJ_IS_CLOSED_BY = inner_space_prove
   ("!op. is_self_adjoint (s,inprod) op ==> is_closed_by s op",
-  MP_SIMP_TAC[is_self_adjoint;HERM_IS_CLOSED_BY_L]);;
+  IMP_REWRITE_TAC[is_self_adjoint;HERM_IS_CLOSED_BY_L]);;
 
 let SELF_ADJ_INPROD = inner_space_prove
   ("!op1 op2. is_self_adjoint (s,inprod) op1 /\ is_closed_by s op2
@@ -1251,139 +1137,114 @@ let SELF_ADJ_INPROD = inner_space_prove
       ==> inprod x ((op1 ** op2) y) = inprod (op1 x) (op2 y)",
   REWRITE_TAC[IS_SELF_ADJOINT;COP_MUL;is_closed_by] THEN MESON_TAC[]);;
   
-let ADD_SELF_ADJ = full_inner_space_prove
-  ("!op1 op2. is_self_adjoint is op1 /\ is_self_adjoint is op2
-    ==> is_self_adjoint is (op1 + op2)",
-  MP_SIMP_TAC[is_self_adjoint;ADD_HERM]);;
-
-let SUB_SELF_ADJ = full_inner_space_prove
-  ("!op1 op2. is_self_adjoint is op1 /\ is_self_adjoint is op2
-    ==> is_self_adjoint is (op1 - op2)",
-  MP_SIMP_TAC[is_self_adjoint;SUB_HERM]);;
-
-let SMUL_SELF_ADJ = full_inner_space_prove
-  ("!a op. real a /\ is_self_adjoint is op ==> is_self_adjoint is (a % op)",
-  MESON_TAC[is_self_adjoint;SMUL_HERM;REAL_CNJ]);;
-
-let MUL_SELF_ADJ = full_inner_space_prove
-  ("!op1 op2.
-    is_self_adjoint is op1 /\ is_self_adjoint is op2 /\ op1 ** op2 = op2 ** op1
-    ==> is_self_adjoint is (op1 ** op2)",
-  MESON_TAC[is_self_adjoint;MUL_HERM]);;
+List.iter (fun (s,t) -> Meta.let_ ~suffix:"_SELF_ADJ" s
+  ("full_inner_space_prove(\"" ^ t
+    ^ "\",MESON_TAC[is_self_adjoint;ARITH_HERM_CLAUSES;REAL_CNJ]);;"))
+  [
+    "ADD",  "!op1 op2. is_self_adjoint is op1 /\ is_self_adjoint is op2
+      ==> is_self_adjoint is (op1 + op2)";
+    "SUB",  "!op1 op2. is_self_adjoint is op1 /\ is_self_adjoint is op2
+      ==> is_self_adjoint is (op1 - op2)";
+    "SMUL", "!a op. real a /\ is_self_adjoint is op
+      ==> is_self_adjoint is (a % op)";
+    "MUL", "!op1 op2. is_self_adjoint is op1 /\ is_self_adjoint is op2
+      /\ op1 ** op2 = op2 ** op1
+      ==> is_self_adjoint is (op1 ** op2)";
+  ];;
 
 let I_SELF_ADJ = prove
   (`!is. is_self_adjoint is I`,
-  REWRITE_TAC[FORALL_INNER_SPACE_THM;IS_SELF_ADJOINT;I_LINCOP;I_THM;
+  REWRITE_TAC[FORALL_INSPACE_THM;IS_SELF_ADJOINT;LINCOP_I;I_THM;
     IS_CLOSED_BY_I]);;
 
 let ZERO_SELF_ADJ = prove
   (`!is. is_self_adjoint is cop_zero`,
   REWRITE_TAC[is_self_adjoint;ZERO_HERM]);;
 
-let selfadjoint_thms = ref [];;
-let add_selfadjoint_thm thm =
-  let thm = GIMP_IMP thm in
-  selfadjoint_thms := thm :: !selfadjoint_thms;
-  let eta_thm = SIMP_RULE[ETA_AX] thm in
-  if (not (equals_thm thm eta_thm))
-  then selfadjoint_thms := eta_thm :: !selfadjoint_thms;;
-let add_selfadjoint_thms = List.iter add_selfadjoint_thm;;
+let selfadj_thms,add_selfadj_thm,add_selfadj_thms = updatable_thms ();; 
+let SELF_ADJOINT_TAC g = IMP_REWRITE_TAC (selfadj_thms ()) g;;
 
-let rec SELF_ADJOINT_TAC g =
-  let MATCH_MP_TAC x y = MATCH_MP_TAC x y in
-  let TRY_SELFADJOINT_THM =
-    ASM (MAP_FIRST (fun x ->
-      MATCH_ACCEPT_TAC x ORELSE MATCH_MP_TAC x)) !selfadjoint_thms in
-  let LOOP =
-    TRY_SELFADJOINT_THM ORELSE (SIMP_TAC[ETA_AX] THEN TRY_SELFADJOINT_THM)
-    ORELSE (ASM_SIMP_TAC[] THEN NO_TAC) ORELSE LINEARITY_TAC
-    ORELSE REAL_TAC ~alternatives:[SELF_ADJOINT_TAC;LINEARITY_TAC] in
-  (REPEAT STRIP_TAC
-  THEN (fun (_,c as g) ->
-    let head = fst (strip_comb c) in
-    if (name_of head = "is_self_adjoint"
-      && can (type_match `:inner_space->cop->bool` (type_of head)) [])
-    then CHANGED_TAC (REPEAT (LOOP THEN REPEAT CONJ_TAC)) g
-    else FAIL_TAC "bad goal" g)) g;;
-
-let REAL_TAC ?(alternatives=[]) =
-  REAL_TAC ~alternatives:(SELF_ADJOINT_TAC::LINEARITY_TAC::alternatives);;
-
-add_selfadjoint_thms [ADD_SELF_ADJ;SUB_SELF_ADJ;SMUL_SELF_ADJ;
+add_selfadj_thms [ADD_SELF_ADJ;SUB_SELF_ADJ;SMUL_SELF_ADJ;
   REWRITE_RULE[COP_SMUL] SMUL_SELF_ADJ;MUL_SELF_ADJ;I_SELF_ADJ;ZERO_SELF_ADJ];;
 
 let ANTI_COMMUTATOR_SELF_ADJ = full_inner_space_prove
   ("!op1 op2. is_self_adjoint is op1 /\ is_self_adjoint is op2
     ==> is_self_adjoint is (op1 ** op2 + op2 ** op1)",
-  REWRITE_TAC[FORALL_INNER_SPACE_THM;IS_SELF_ADJOINT]
-  THEN SIMP_HORN_TAC THEN REPEAT STRIP_TAC THEN TRY LINEARITY_TAC
-  THEN ASM MP_SIMP_TAC[IS_CLOSED_BY_COP_ADD;IS_CLOSED_BY_COP_MUL;COP_MUL;
-    COP_ADD;IS_CLOSED_BY_COP_MUL;INNER_SPACE_IS_SUBSPACE;INPROD_ADD_LDIST;
-    INPROD_ADD_RDIST]
-  THEN ASM_MESON_TAC[COMPLEX_ADD_SYM;is_closed_by]);;
+  REWRITE_TAC[FORALL_INSPACE_THM;IS_SELF_ADJOINT]
+  THEN IMP_REWRITE_TAC (lincompose_thms () @ [IS_CLOSED_BY_COP_ADD;
+    IS_CLOSED_BY_COP_MUL;IS_CLOSED_BY_COP_MUL])
+  THEN REWRITE_TAC[COP_MUL;COP_ADD;is_closed_by]
+  THEN IMP_REWRITE_TAC[INSPACE_IS_SUBSPACE;INSPACE_ADD_LDIST;
+    INSPACE_ADD_RDIST]
+  THEN REPEAT STRIP_TAC THEN ASM_IMP_REWRITE_TAC[]
+  THEN CONV_TAC COMPLEX_FIELD);;
 
-add_selfadjoint_thm ANTI_COMMUTATOR_SELF_ADJ;;
+add_selfadj_thm ANTI_COMMUTATOR_SELF_ADJ;;
 
 let NEG_SELF_ADJ = full_inner_space_prove
   ("!op. is_linear_cop op /\ is_self_adjoint is op
     ==> is_self_adjoint is (--op)",
   ONCE_REWRITE_TAC[GSYM COP_SUB_LZERO] THEN SELF_ADJOINT_TAC);;
 
-add_selfadjoint_thm NEG_SELF_ADJ;;
+add_selfadj_thm NEG_SELF_ADJ;;
 
 let SCALAR_II_HERM = inner_space_prove
   ("!op. is_linear_cop op /\ (!x y. inprod (op x) y = -- (inprod x (op y)))
       /\ is_closed_by s op
         ==> is_self_adjoint (s,inprod) (ii % op)",
-  MP_SIMP_TAC[IS_SELF_ADJOINT;COP_SMUL_THM;IS_CLOSED_BY_COP_SMUL;is_closed_by;
-    INNER_SPACE_IS_SUBSPACE;INPROD_LSMUL;INPROD_RSMUL;CNJ_II;COMPLEX_NEG_MUL2]
-  THEN LINEARITY_TAC);;
+  IMP_REWRITE_TAC ([IS_SELF_ADJOINT;COP_SMUL_THM;IS_CLOSED_BY_COP_SMUL;is_closed_by;
+    INSPACE_IS_SUBSPACE;INSPACE_LSMUL;INSPACE_RSMUL;CNJ_II;]
+    @ lincompose_thms ())
+  THEN REPEAT STRIP_TAC THEN ASM_IMP_REWRITE_TAC[]
+  THEN CONV_TAC COMPLEX_FIELD);;
 
-add_selfadjoint_thm SCALAR_II_HERM;;
+add_selfadj_thm SCALAR_II_HERM;;
 
 let COMMUTATOR_ANTI_HERM = inner_space_prove
   ("!op1 op2. is_self_adjoint (s,inprod) op1 /\ is_self_adjoint (s,inprod) op2
     ==> !x y. x IN s /\ y IN s
       ==> inprod (commutator op1 op2 x) y = --(inprod x (commutator op1 op2 y))",
-  MP_SIMP_TAC[commutator;IS_SELF_ADJOINT;COP_MUL_THM;COP_SUB_THM;is_closed_by;
-    INPROD_SUB_LDIST;INPROD_SUB_RDIST;COMPLEX_NEG_SUB]);;
+  IMP_REWRITE_TAC[commutator;IS_SELF_ADJOINT;COP_MUL_THM;COP_SUB_THM;is_closed_by;
+    INSPACE_SUB_LDIST;INSPACE_SUB_RDIST;COMPLEX_NEG_SUB]
+  THEN REPEAT STRIP_TAC THEN ASM_IMP_REWRITE_TAC[]);;
 
-add_selfadjoint_thm COMMUTATOR_ANTI_HERM;;
+add_selfadj_thm COMMUTATOR_ANTI_HERM;;
 
 let II_COMMUTATOR_HERM = full_inner_space_prove
   ("!op1 op2. is_self_adjoint is op1 /\ is_self_adjoint is op2
     ==> is_self_adjoint is (ii % commutator op1 op2)",
-  MP_SIMP_TAC[FORALL_INNER_SPACE_THM;IS_SELF_ADJOINT;COP_SMUL_THM;INPROD_RSMUL;
-    INPROD_LSMUL;IS_CLOSED_BY_COMMUTATOR;IS_CLOSED_BY_COP_SMUL;CNJ_II;II_NZ;
-    INNER_SPACE_IS_SUBSPACE;COMPLEX_MUL_LNEG;GSYM COMPLEX_MUL_RNEG;
-    COMPLEX_EQ_MUL_LCANCEL;]
+  IMP_REWRITE_TAC[FORALL_INSPACE_THM;IS_SELF_ADJOINT;COP_SMUL_THM;INSPACE_RSMUL;
+    INSPACE_LSMUL;IS_CLOSED_BY_COMMUTATOR;IS_CLOSED_BY_COP_SMUL;CNJ_II;II_NZ;
+    INSPACE_IS_SUBSPACE;COMPLEX_MUL_LNEG;GSYM COMPLEX_MUL_RNEG;
+    COMPLEX_EQ_MUL_LCANCEL]
   THEN ONCE_REWRITE_TAC[COMPLEX_FIELD `x = --y <=> y = --x:complex`]
-  THEN MP_SIMP_TAC [GIMP_IMP COMMUTATOR_ANTI_HERM;is_self_adjoint;is_hermitian;
-    REWRITE_RULE[is_closed_by] IS_CLOSED_BY_COMMUTATOR;INNER_SPACE_IS_SUBSPACE;
-    is_closed_by]
-  THEN LINEARITY_TAC);;
+  THEN IMP_REWRITE_TAC ([COMMUTATOR_ANTI_HERM;is_self_adjoint;is_hermitian;
+    is_closed_by;REWRITE_RULE[is_closed_by] IS_CLOSED_BY_COMMUTATOR;
+    INSPACE_IS_SUBSPACE] @ lincompose_thms ())
+  THEN REPEAT STRIP_TAC THEN ASM_SIMP_TAC[]);;
  
-add_selfadjoint_thm II_COMMUTATOR_HERM;;
+add_selfadj_thm II_COMMUTATOR_HERM;;
 
 let EXPEC_HERM_REAL = inner_space_prove
   ("!op state. is_self_adjoint (s,inprod) op /\ state IN s
     ==> real (expectation inprod state op)", 
-  MP_SIMP_TAC[IS_SELF_ADJOINT;expectation;is_closed_by;REAL_CNJ;INPROD_CNJ]);;
+  IMP_REWRITE_TAC[IS_SELF_ADJOINT;expectation;is_closed_by;REAL_CNJ;
+    INSPACE_CNJ]
+  THEN SIMP_TAC[]);;
 
-add_real_thms [EXPEC_HERM_REAL; REWRITE_RULE[expectation] EXPEC_HERM_REAL];;
+add_real_thms [EXPEC_HERM_REAL;REWRITE_RULE[expectation] EXPEC_HERM_REAL];;
 
 let DEVIATION_HERM = inner_space_prove
   ("!op state. is_self_adjoint (s,inprod) op /\ state IN s
     ==> is_self_adjoint (s,inprod) (deviation inprod state op)",
-  REWRITE_TAC[DEVIATION_ALT] THEN SELF_ADJOINT_TAC THEN ASM_MESON_TAC[]);;
+  REWRITE_TAC[DEVIATION_ALT] THEN SELF_ADJOINT_TAC THEN REAL_TAC);;
 
-add_selfadjoint_thms [DEVIATION_HERM; REWRITE_RULE[deviation] DEVIATION_HERM];;
+add_selfadj_thms [DEVIATION_HERM;REWRITE_RULE[deviation] DEVIATION_HERM];;
 
 let VARIANCE_REAL = inner_space_prove
   ("!op state.  state IN s /\ is_self_adjoint (s,inprod) op
     ==> real (variance inprod state op)", 
-  REWRITE_TAC[variance] THEN REAL_TAC THEN HINT_EXISTS_TAC
-  THEN SELF_ADJOINT_TAC);;
+  REWRITE_TAC[variance] THEN REAL_TAC THEN SELF_ADJOINT_TAC);;
 
 add_real_thm VARIANCE_REAL;;
 

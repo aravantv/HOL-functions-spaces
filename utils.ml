@@ -107,13 +107,29 @@ module Pa =
       call_with_interface prioritize_complex SIMPLE_COMPLEX_ARITH;
   end;;
 
-needs "mp_simp.ml";;
-
 let wrap f x = f [x];;
 
 let rec fixpoint f x =
   let y = f x in
   if y = x then y else fixpoint f y;;
+
+let rec SPEC_VARS th =
+  try
+    let v,th' = SPEC_VAR th in
+    let vs,th'' = SPEC_VARS th' in
+    v::vs,th''
+  with _ -> [],th;;
+
+let MAP_FORALL_BODY f th =
+  let vs,th = SPEC_VARS th in
+  GENL vs (f th);;
+
+let GCONV_TAC = CONV_TAC o DEPTH_CONV o CHANGED_CONV;;
+
+let CONJS xs = end_itlist CONJ xs;;
+
+let EQ_RIMP = MAP_FORALL_BODY (fst o EQ_IMP_RULE);;
+let EQ_LIMP = MAP_FORALL_BODY (snd o EQ_IMP_RULE);;
 
 let gimp_imp =
   let rec self vars premisses t =
@@ -134,10 +150,6 @@ let gimp_imp =
   in
   self [] [];;
 
-let GIMP_IMP_CONV t = MESON[](mk_eq(t,gimp_imp t));;
-
-let GIMP_IMP = CONV_RULE GIMP_IMP_CONV;;  
-
 let MATCH_TRANS thm1 thm2 =
   GEN_ALL (DISCH_ALL (MATCH_MP thm2 (UNDISCH (SPEC_ALL thm1))));;
 
@@ -150,3 +162,90 @@ let rt = REWRITE_TAC;;
 let rr = REWRITE_RULE;;
 let (!!) t = REPEAT t;;
 let (!?) t xs = REPEAT (MAP_FIRST (CHANGED_TAC o t) xs);;
+
+(* Toploop related *)
+
+module Meta =
+  struct
+    let exec =
+      ignore o Toploop.execute_phrase false Format.std_formatter
+        o !Toploop.parse_toplevel_phrase o Lexing.from_string
+
+    let name ?(prefix="") ?(suffix="") s = prefix ^ s ^ suffix
+
+    let let_ ?prefix ?suffix s v =
+      exec ("let " ^ name ?prefix ?suffix s ^ " = " ^ v ^ ";;")
+
+    let get = Obj.magic o Toploop.getvalue
+
+    let wrap f t = f ^ "(parse_term(\"" ^ t ^ "\"))"
+    let prove ?prefix ?suffix s t tac =
+      print_endline ("Proved " ^ name ?prefix ?suffix s);
+      let_ ?prefix ?suffix s (wrap ("C (curry prove) (" ^ tac ^ ")") t)
+    let new_definition s t =
+      print_endline ("Defined " ^ s);
+      let_ s (wrap "new_definition" t)
+  end;;
+
+let updatable_thms () =
+  let ths = ref [] in
+  (fun () -> !ths),
+  (fun t -> ths := t :: !ths),
+  (fun ts -> ths := ts @ !ths);;
+
+let property_db_temp = ref TRUTH;;
+
+let property_db prefix =
+  let properties = ref [] in
+  let store_thm s th =
+    let s' = prefix ^ "_" ^ s in
+    property_db_temp := th;
+    print_endline ("Stored theorem " ^ s');
+    Meta.let_ s' "!property_db_temp";
+    properties := (s,th) :: !properties
+  in
+  store_thm,fun () -> !properties;;
+
+let prime_prefix s =
+  let rec self n =
+    if n < 0
+    then failwith "prime_prefix"
+    else
+      if s.[n] = '\''
+      then self (n-1)
+      else String.sub s 0 (n+1)
+  in
+  self (String.length s - 1);;
+
+let assoc_list x = snd o unzip o filter (fun (y,_) -> y = x);;
+
+let group_by_prefix vs =
+  let ord ((x:string),_) (y,_) = x < y in
+  let xs = sort ord (map (fun v -> prime_prefix (name_of v),v) vs) in
+  let prefixes = uniq (fst (unzip xs)) in
+  map (fun p -> p,assoc_list p xs) prefixes;;
+
+let mapi f = 
+  let rec self i = function
+  |[] -> []
+  |a::l ->
+      let r = f i a in
+      r :: self (i + 1) l
+  in
+  self 0;;
+
+let alt_names_by_prefix pfx = function
+  |[_] as vs -> vs
+  |_ as vs ->
+      mapi (fun i v -> mk_var(pfx ^ string_of_int (i+1),type_of v)) vs;;
+
+let alt_names =
+  flat o map (fun (pfx,vs) -> zip vs (alt_names_by_prefix pfx vs))
+    o group_by_prefix;;
+
+let UNIQUE_NAME_CONV t =
+  let vs = variables t in
+  let mapping = filter (fun (x,y) -> x <> y) (alt_names vs) in
+  DEPTH_CONV (fun u -> ALPHA_CONV (assoc (bndvar u) mapping) u) t;;
+
+let UNIQUE_NAME_RULE = CONV_RULE UNIQUE_NAME_CONV;;
