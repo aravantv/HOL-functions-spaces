@@ -97,12 +97,13 @@ let CART_TYBIJ = prove
     /\ mk_cart o dest_cart = I /\ dest_cart o mk_cart = I`,
   REWRITE_TAC[REWRITE_RULE [] cart_tybij;o_DEF;I_DEF]);;
 
+(* FIXME: WARNING name modification here *)
 let FORALL_CFUN = prove
-  (`!P. (!x. P x) = !x. P (dest_cart x)`,
+  (`!P. (!f. P f) = !v. P (dest_cart v)`,
   MESON_TAC[CART_TYBIJ]);;
 
 let DEST_CART_INJ = prove
-  (`!x y. dest_cart x = dest_cart y <=> x = y`,
+  (`!f g. dest_cart f = dest_cart g <=> f = g`,
   MESON_TAC[CART_TYBIJ]);;
 
 let DEST_CART_FUN_EQ_THM = prove
@@ -114,21 +115,20 @@ let MK_CART_INJ = prove
   (`!x y. mk_cart x = mk_cart y <=> x = y`,
   MESON_TAC[CART_TYBIJ]);;
 
-let K_DEST_CART = prove
-  (`!x. K x = dest_cart (vector_const x)`,
-  REWRITE_TAC[GSYM MK_CART_INJ;CART_TYBIJ;CART_EQ;VECTOR_CONST_COMPONENT]
-  THEN REWRITE_TAC[finite_index;CART_TYBIJ;K_THM]);;
+let common_prove t = prove(t,
+  REWRITE_TAC[GSYM MK_CART_INJ;CART_TYBIJ;CART_EQ;VECTOR_CONST_COMPONENT;
+    VECTOR_MAP_COMPONENT;VECTOR_MAP2_COMPONENT]
+  THEN REWRITE_TAC[finite_index;CART_TYBIJ;K_THM;o_THM;FUN_MAP2_THM]);;
 
-let FUN_MAP_DEST_CART = prove
-  (`!f x. f o (dest_cart x) = dest_cart (vector_map f x)`,
-  REWRITE_TAC[GSYM MK_CART_INJ;CART_TYBIJ;CART_EQ;VECTOR_MAP_COMPONENT]
-  THEN REWRITE_TAC[finite_index;CART_TYBIJ;o_THM]);;
+let K_DEST_CART = common_prove
+  `!x. K x = dest_cart (vector_const x)`;;
 
-let FUN_MAP2_DEST_CART = prove
-  (`!f x y. fun_map2 f (dest_cart x) (dest_cart y)
-    = dest_cart (vector_map2 f x y)`,
-  REWRITE_TAC[GSYM MK_CART_INJ;CART_TYBIJ;CART_EQ;VECTOR_MAP2_COMPONENT]
-  THEN REWRITE_TAC[finite_index;CART_TYBIJ;FUN_MAP2_THM]);;
+let FUN_MAP_DEST_CART = common_prove
+  `!f x. f o (dest_cart x) = dest_cart (vector_map f x)`;;
+
+let FUN_MAP2_DEST_CART = common_prove
+  `!f x y. fun_map2 f (dest_cart x) (dest_cart y)
+    = dest_cart (vector_map2 f x y)`;;
 
 let LET_DEST_CART = prove
   (`(let x = dest_cart y in f x y) = (let x = y in f (dest_cart x) y)`,
@@ -284,18 +284,12 @@ let MK_CART_FUN_EQ_THM = prove
   (`!f g. (\x. f (mk_cart x)) = (\x. g (mk_cart x)) <=> (\x. f x) = (\x. g x)`,
   REWRITE_TAC[FUN_EQ_THM] THEN MESON_TAC[CART_TYBIJ]);;
 
-let MK_CART_K = prove
-  (`!x. mk_cart (K x) = vector_const x`,
-  REWRITE_TAC[K_DEST_CART;CART_TYBIJ;FORALL_CFUN]);;
-
-let PUSH_MK_CART = CONJS [MK_CART_K;MK_CART_FUN_MAP;MK_CART_FUN_MAP2];;
-
 (* Then deriving the results from the abstract ones. *)
 
 let cfun_to_cvector_with_mk_cart th =
   let intro_carts = REWRITE_RULE [FORALL_CFUN] in
   let canon = REWRITE_RULE[cfun_defs] in
-  let pull = REWRITE_RULE [PULL_DEST_CART;PUSH_MK_CART] in
+  let pull = REWRITE_RULE [PULL_DEST_CART] in
   let elim_carts = REWRITE_RULE[DEST_CART_INJ;DEST_CART_FUN_EQ_THM;CART_TYBIJ;
     MK_CART_FUN_EQ_THM]
   in
@@ -322,6 +316,12 @@ let _ = map_thms "CORTHOGONAL" inner_space_to_cdot orthogonal_thms;;
 let clinear = new_definition
   `clinear (f:complex^M->complex^N)
     <=> (!x y. f (x + y) = f x + f y) /\ (!c x. f (c % x) = c % f x)`;;
+
+let MK_CART_K = prove
+  (`!x. mk_cart (K x) = vector_const x`,
+  REWRITE_TAC[K_DEST_CART;CART_TYBIJ;FORALL_CFUN]);;
+
+let PUSH_MK_CART = CONJS [MK_CART_K;MK_CART_FUN_MAP;MK_CART_FUN_MAP2];;
 
 let LINCOP_CLINEAR = prove
   (`!f. is_linear_cop (dest_cart o f o mk_cart) <=> clinear f`,
@@ -353,7 +353,8 @@ let cop_to_cvector th =
     else failwith "ALPHA_CONV'"
   in
   let clean = CONV_RULE (DEPTH_CONV ALPHA_CONV') in
-  (clean o elim_lincop o cfun_to_cvector_with_mk_cart o canon o intro_carts) th;;
+  (UNIQUE_NAME_RULE o clean o elim_lincop o cfun_to_cvector_with_mk_cart
+    o canon o intro_carts) th;;
 
 let _ = map_thms "CLINEAR" (cop_to_cvector o finitize_type) linear_thms;;
 
@@ -368,10 +369,20 @@ let cbasis = new_definition
 let cfun_basis = new_definition
   `cfun_basis (x:A) : cfun = \y. if y = x then Cx(&1) else Cx(&0)`;;
 
-let cmatrix_of_cop = new_definition
+let CMATRIX_OF_COP = new_definition
   `cmatrix_of_cop (op:((N)finite_image->complex)->((M)finite_image->complex))
     : complex^N^M =
     lambda i j. mk_cart (op (cfun_basis (finite_index j)))$i`;;
+
+let cmatrix_of_cop = prove
+  (`!op.
+    cmatrix_of_cop op = lambda i j. mk_cart (op (dest_cart (cbasis j)))$i`,
+  REWRITE_TAC[CMATRIX_OF_COP;cfun_basis;cbasis;DEST_CART_LAMBDA]
+  THEN ONCE_REWRITE_TAC[CART_EQ] THEN REWRITE_TAC[COMPLEX_CART_EQ]
+  THEN SIMP_TAC[LAMBDA_BETA] THEN REPEAT STRIP_TAC
+  THEN AP_THM_TAC THEN REPEAT AP_TERM_TAC THEN REWRITE_TAC[FUN_EQ_THM]
+  THEN GEN_TAC THEN REPEAT COND_CASES_TAC
+  THEN ASM_MESON_TAC[REWRITE_RULE[IN_NUMSEG] finite_image_tybij]);;
 
 overload_interface ("**",
   `(cmatrix_cvector_mul):complex^N^M->complex^N->complex^M`);;
@@ -385,7 +396,7 @@ let cop_of_cmatrix = new_definition
 
 let CMATRIX_OF_COP_OF_CMATRIX = prove
   (`!m:complex^N^M. cmatrix_of_cop (cop_of_cmatrix m) = m`,
-  REWRITE_TAC[cmatrix_of_cop;cop_of_cmatrix;cfun_basis;cmatrix_cvector_mul]
+  REWRITE_TAC[CMATRIX_OF_COP;cop_of_cmatrix;cfun_basis;cmatrix_cvector_mul]
   THEN REPLICATE_TAC 2 (ONCE_REWRITE_TAC[CART_EQ])
   THEN SIMP_TAC[LAMBDA_BETA;CART_TYBIJ]
   THEN REWRITE_TAC[finite_index;CART_TYBIJ]
@@ -472,7 +483,7 @@ let COP_OF_CMATRIX_OF_COP = prove
   REWRITE_TAC[COP_EQ;COP_OF_CMATRIX_CFUN_SUM]
   THEN ONCE_SIMP_TAC[LINCOP_FINITE_BASIS_EXPANSION]
   THEN IMP_REWRITE_TAC[CFUN_SUM_EQ]
-  THEN REWRITE_TAC[FUN_EQ_THM;cmatrix_of_cop;CFUN_SMUL_THM;finite_index;CART_TYBIJ]
+  THEN REWRITE_TAC[FUN_EQ_THM;CMATRIX_OF_COP;CFUN_SMUL_THM;finite_index;CART_TYBIJ]
   THEN IMP_REWRITE_TAC [COMPLEX_FIELD `x = z ==> x * y = y * z`]
   THEN REPEAT STRIP_TAC THEN Pa.SPEC_TAC ("x'","x'")
   THEN SIMP_TAC[FORALL_FINITE_INDEX;GSYM finite_index;LAMBDA_BETA]
@@ -542,6 +553,7 @@ List.iter (fun (s,t) ->
     "zero", "= vector_const cvector_zero";
     "mul",  "= \m1:complex^N^M m2:complex^P^N.
       lambda i j. vsum(1..dimindex(:N)) (\k. m1$i$k * m2$k$j)";
+    "cnj", "= vector_map cvector_cnj";
   ];;
 
 let _ = prioritize_cmatrix ();;
@@ -600,19 +612,46 @@ let SMUL_COP_OF_MATRIX = common_prove
 let COP_ZERO_AS_COP_OF_MATRIX = common_prove
   `cop_zero = cop_of_cmatrix cmatrix_zero`;;
 
+let PULL_COP_OF_CMATRIX = CONJS
+    [MUL_COP_OF_CMATRIX;ADD_COP_OF_MATRIX;SUB_COP_OF_MATRIX;
+      NEG_COP_OF_MATRIX;SMUL_COP_OF_MATRIX;COP_ZERO_AS_COP_OF_MATRIX];;
+
 let lincop_to_cmatrix =
   let TRY_IMPCONV_RULE c th = try IMPCONV_RULE c th with _ -> th in
-  let intro_cop_of_cmatrix =
+  let intro =
     TRY_IMPCONV_RULE (REDEPTH_IMPCONV (MATCH_MP_IMPCONV FORALL_COP_MATRIX)) 
-      o REWRITE_RULE [FORALL_LINCOP;COP_ZERO_AS_COP_OF_MATRIX]
+      o REWRITE_RULE [FORALL_LINCOP]
   in
-  let pull_cop_of_cmatrix =
-    REWRITE_RULE[MUL_COP_OF_CMATRIX;ADD_COP_OF_MATRIX;SUB_COP_OF_MATRIX;
-      NEG_COP_OF_MATRIX;SMUL_COP_OF_MATRIX;COP_ZERO_AS_COP_OF_MATRIX;
-      COP_OF_CMATRIX_INJ]
-  in
+  let pull = REWRITE_RULE[PULL_COP_OF_CMATRIX] in
+  let elim = REWRITE_RULE[COP_OF_CMATRIX_INJ] in
   let elim_more = SIMP_RULE[COP_EQ;FORALL_FINITE_INDEX;GSYM finite_index] in
-  UNIQUE_NAME_RULE o elim_more o pull_cop_of_cmatrix o intro_cop_of_cmatrix;;
+  (* UNIQUE_NAME_RULE is used only for cosmetic purposes, to have nice names *)
+  UNIQUE_NAME_RULE o elim_more o elim o pull o intro;;
 
 let _ = map_thms "CMATRIX" (lincop_to_cmatrix o finitize_type)
   (fun _ -> cop_thms () @ linear_thms ());;
+
+
+(* ========================================================================= *)
+(* MATRIX HERMITIANS                                                         *)
+(* ========================================================================= *)
+
+let ctransp = new_definition
+  `(ctransp:complex^N^M->complex^M^N) m = lambda i j. m$j$i`;;
+
+let cmatrix_herm = new_definition
+  `cmatrix_herm = cmatrix_cnj o ctransp`;;
+
+(*let MATRIX_HERMITIAN = prove
+  (`!m. is_hermitian (UNIV,\x y. (mk_cart x) cdot (mk_cart y))
+    (cop_of_cmatrix m) (cop_of_cmatrix (cmatrix_herm m))`,
+  REWRITE_TAC[is_hermitian;is_closed_by;IN_UNIV;CDOT_IS_INNER_SPACE;CART_TYBIJ;
+    o_DEF;cdot;LINCOP_COP_OF_CMATRIX;cmatrix_cvector_mul;cmatrix_herm;
+    cop_of_cmatrix;cmatrix_cnj;cvector_cnj;VECTOR_MAP_COMPONENT;ctransp]
+  THEN REPEAT GEN_TAC THEN MATCH_MP_TAC VSUM_EQ
+  THEN SIMP_TAC[LAMBDA_BETA;IN_NUMSEG]
+  THEN IMP_REWRITE_TAC[GSYM VSUM_CMUL;CNJ_VSUM;FINITE_NUMSEG;CNJ_CNJ;
+    ONCE_REWRITE_RULE[COMPLEX_MUL_SYM] (GSYM VSUM_CMUL)]
+  THEN REPEAT STRIP_TAC THEN AP_TERM_TAC
+  THEN REWRITE_TAC[FUN_EQ_THM]
+*)
