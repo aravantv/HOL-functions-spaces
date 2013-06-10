@@ -249,3 +249,55 @@ let UNIQUE_NAME_CONV t =
   DEPTH_CONV (fun u -> ALPHA_CONV (assoc (bndvar u) mapping) u) t;;
 
 let UNIQUE_NAME_RULE = CONV_RULE UNIQUE_NAME_CONV;;
+
+
+(* The following originally comes from tacticlib.ml *)
+
+let CHANGED_RULE r thm =
+  let thm' = r thm in
+  if equals_thm thm thm' then failwith "CHANGED_RULE" else thm';;
+
+let MAP_ASSUMPTIONS f =
+  REPEAT (POP_ASSUM (MP_TAC o f)) THEN REPEAT DISCH_TAC;;
+
+let REWRITE_ASSUMPTIONS xs = MAP_ASSUMPTIONS (REWRITE_RULE xs);;
+
+let ON_FIRST_GOAL ?(out_of=2) x =
+  let rec ( * ) n x = if n<=1 then [] else x :: (n-1) * x in
+  x :: out_of * ALL_TAC;;
+
+let MAP_ANTECEDENT f = DISCH_THEN (MP_TAC o f);;
+
+let exn_to_bool f x = try ignore (f x); true with _ -> false;;
+
+let strip_parentheses s =
+  if s.[0] = '(' && s.[String.length s-1] = ')'
+  then String.sub s 1 (String.length s-2) else s;;
+
+let contains_sub_term_name name =
+  exn_to_bool
+    (find_term (fun x -> ((=) name o strip_parentheses o string_of_term) x));;
+
+let try_or_id f x = try f x with _ -> x;;
+
+let ASSUME_CONSEQUENCES x =
+  ASM (MAP_EVERY (fun y -> try ASSUME_TAC (MATCH_MP x y) with _ -> ALL_TAC))
+    [];;
+
+let ASM_CSQ_THEN ?(remove=false) ?(match_=true) x ttac =
+  (if remove then FIRST_X_ASSUM else FIRST_ASSUM)
+    (ttac o (if match_ then MATCH_MP else MP) x);;
+
+let ASM_CSQS_THEN x ttac =
+  (* looks absurd, eh? But needed in order to control the execution flow *)
+  let ttac x y = ttac x y in 
+  REPEAT_TCL (fun y z -> ASM_CSQ_THEN z y ORELSE ttac z) ttac x;;
+
+let distrib fs x = map (fun f -> f x) fs;;
+
+let DISTRIB ttacs x = EVERY (distrib ttacs x);;
+
+let LET_DEFs = CONJ LET_DEF LET_END_DEF;;
+
+let GEQ_IMP x = GEN_ALL (MATCH_MP EQ_IMP (SPEC_ALL x));;
+

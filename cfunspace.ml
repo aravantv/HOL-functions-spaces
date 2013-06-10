@@ -2,11 +2,11 @@
 (*                                                                           *)
 (*           Library of complex function vector spaces.                      *)
 (*                                                                           *)
-(*   (c) Copyright, Mohamed Yousri Mahmoud, Vincent Aravantinos, 2012-2013   *)
+(*   (c) Copyright, Mohamed Yousri Mahmoud & Vincent Aravantinos, 2012-2013  *)
 (*                  Hardware Verification Group,                             *)
 (*                  Concordia University                                     *)
 (*                                                                           *)
-(*           Contact: <mosolim@ece.concordia.ca>, <vincent@ece.concordia.ca> *)
+(*          Contact: <mosolim@ece.concordia.ca>, <vincent@ece.concordia.ca>  *)
 (*                                                                           *)
 (* TODO:                                                                     *)
 (* - reword complex numbers as cfuns in order to factorize the notions of    *)
@@ -107,6 +107,11 @@ new_type_abbrev("cfunC",`:C->complex`);;
 
 (* The following definitions can be accessed by prefixing "cfun_" to their
  * names. *)
+(* Remark to CPP reviewers: these definition slightly differ from their
+ * presentation in the paper since we make use of general combinators
+ * (fun_map2, (o), K) which allow to factorize some proofs.
+ * The resulting definitions are equivalent however.
+ *)
 List.iter (fun (s,t) -> let s' = "cfun_" ^ s in Meta.new_definition s' (s' ^ t))
   [
     "add",  "= fun_map2 (+):cfun->cfun->cfun";
@@ -124,6 +129,7 @@ let CFUN_SMUL =
 let cfun_defs = CONJS [cfun_add;cfun_sub;CFUN_SMUL;cfun_neg;cfun_cnj;cfun_zero];;
 
 make_overloadable "%" `:A->B->B`;;
+overload_interface("%",`(%):real->real^N->real^N`);;
 
 let prioritize_cfun () =
   overload_interface("+",`cfun_add:cfun->cfun->cfun`);
@@ -166,6 +172,7 @@ List.iter (uncurry CFUN_ARITH_store) [
     "SUB_THM",        `!f g x. (f - g) x = f x - g x`;
     "ADD",            `!f g. f + g = \x. f x + g x`;
     "SMUL",           `!a f. a % f = \x. a * f x`;
+    "ZERO",           `!x. cfun_zero x = Cx(&0)`;
     "SMUL_THM",       `!a f x. (a % f) x = a * f x`;
     "NEG_LAMBDA",     `!f. --f = \x. --(f x)`;
     "SMUL_LNEG",      `!a f. (--a) % f = --(a % f)`;
